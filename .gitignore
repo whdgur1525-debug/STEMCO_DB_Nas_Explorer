@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+.vs/
+artifacts/
+work/
+*.user
+*.suo
+*.log
+*.dmp
+*.pgpass
+profiles.local.json

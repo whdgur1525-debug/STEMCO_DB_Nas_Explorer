@@ -1,0 +1,81 @@
+Synapse NAS Explorer 0.1
+
+NAS PostgreSQL에 저장된 검사 결과를 읽기 전용으로 탐색하는 별도 Windows x64 프로그램입니다.
+Handler, Vision, VMS, DataTransfer의 설치 파일을 교체하지 않습니다.
+VisionPlatform은 열람한 원본이며 프로젝트 참조나 제품 DLL 의존성으로 연결하지 않습니다.
+HALCON, 장비 모션, MES, 다모테크 전송 및 PostgreSQL 복제 기능이 없습니다.
+
+사용
+1. 배포 ZIP을 새 폴더에 모두 풀고 AOI-NasExplorer.exe를 실행합니다. EXE만 따로 복사하지 않습니다.
+2. NAS 연결에서 IP/호스트, 포트, 계정, 비밀번호를 입력합니다.
+   최초 DB는 보통 postgres, 모델 DB는 보통 aoi_model입니다. 현장 설정에 맞게 바꿀 수 있습니다.
+   같은 PC에서 사용하는 기존 Handler/Vision의 설정을 자동으로 덮어쓰거나 접속하지 않습니다.
+3. 왼쪽 DB를 펼치거나 목록을 더블클릭하여 모델 → LOT → 레이어 → 검사 이력 → 불량으로 이동합니다.
+4. 모델/LOT 검색과 상세 검색을 사용합니다. 기간 조건은 실제 inspection.time 기준이며 종료일을 포함합니다.
+5. 불량을 선택하면 이미지와 전체 원본 필드를 확인합니다. 이미지 휠 확대, 맞춤, 1:1, 원본 저장을 지원합니다.
+6. CSV는 현재 검색 범위 전체를 읽습니다. 선택 이미지는 선택 행만, 전체 이미지는 검색 범위 전체입니다.
+7. 검사 이력에서 검사 행을 선택하고 ERT 보기/저장을 사용합니다.
+
+예제 보기
+실제 NAS 연결 없이 화면 조작을 살펴볼 수 있습니다. 상단과 목록에 예제임을 표시합니다.
+EXE의 --demo 옵션도 같은 기능입니다.
+
+데이터의 의미
+- DB 이름과 원본 PK를 함께 유지합니다. 다른 DB의 같은 숫자 ID를 같은 결과로 합치지 않습니다.
+- 최신만 보기는 DB·레이어·장비·패널·PC별 기준입니다. 다른 DB까지 자동 통합한 전역 최신이 아닙니다.
+- Handler가 만든 공용 inspection의 pc_no=0은 그대로 표시합니다. 3대 Vision 결과가 같은 inspection_id를
+  공유하는 현장 구조에서는 해당 ID의 불량을 모두 읽습니다. PC 번호로 행을 버리지 않습니다.
+- 완료·진행·미완료 검사를 숨기지 않습니다. 실제 상태는 원본 상태 문자열로 표시합니다.
+- 원본 상세에서 NULL(값 미기록), 컬럼 없음(구형 DB), 실제 숫자 0을 구분합니다.
+- VMS UPDATE 이전의 판정 변경 이력이 DB에 보존되지 않았다면 과거 판정을 복원할 수 없습니다.
+- ARCHIVE 상태도 실제 DB가 남아 있으면 조회합니다. DROP 후 백업 파일만 남은 DB는 직접 열 수 없습니다.
+- 일부 DB 접근에 실패하면 실패 DB 수와 작업 기록을 표시합니다. 0건 조회로 성공 처리하지 않습니다.
+
+이미지
+목록은 BYTEA를 읽지 않습니다. 선택 이미지/썸네일만 읽고, 디코딩 캐시를 32MB로 제한합니다.
+원본 encoded PNG/JPEG/TIFF/BMP/GIF와 크기가 기록된 raw Gray8/RGB24를 처리합니다.
+크기·채널을 확인할 수 없는 raw 이미지는 임의로 정사각형으로 만들지 않습니다.
+원본 추출은 바이트와 크기·채널 JSON을 보존하고, raw의 PNG는 열람 사본으로 추가합니다.
+한 이미지가 64MB를 초과하거나 디코딩을 지원하지 않으면 실패 사유를 남깁니다.
+
+ERT
+ERT는 DB 재구성본입니다. 과거에 생성했던 원본 .ert 파일을 다운로드했다고 주장하지 않습니다.
+선택한 inspection_id의 전체 행을 읽기 전용 RepeatableRead 스냅샷에서 스트리밍합니다.
+같은 패널의 다른 검사 ID를 자동으로 합치지 않으며 각 검사별 폴더로 보존합니다.
+미리보기는 최대 2,000행, 파일 저장은 선택한 검사의 전체 행입니다.
+모델 위치·해상도는 현재 모델 DB 기준입니다. 검사 당시 모델 스냅샷이라는 보장은 없습니다.
+원본 바·축 정보가 있으면 사용하고, 없는 행은 현재 모델 기반 계산과 보정 내역을 출처 JSON에 남깁니다.
+측정 크기가 기록돼 있으면 사용하고, 미기록 시 호환 기본값 0과 그 사실을 기록합니다.
+기존 DataTransfer 일부 버전은 DB에 측정값이 있어도 면적을 0으로 출력하므로 바이트가 항상 같지는 않습니다.
+모델 DB가 회수 덤프에 없거나 접속 불가능하면 ERT 재구성을 완료할 수 없습니다.
+그 경우에도 원본 결과·측정값·JSON·CSV·이미지 조회는 독립적으로 사용할 수 있습니다.
+일반 텍스트 출력은 UTF-8, ERT는 CP949입니다. 저장 실패/취소 시 .partial 파일을 남깁니다.
+새 파일 생성 방식으로 기존 결과를 덮어쓰지 않습니다.
+
+설정과 로그
+%LOCALAPPDATA%\Synapse\NasExplorer
+  connection.json : 연결 프로필. 비밀번호 저장은 사용자가 체크한 경우에만 현재 Windows 계정 DPAPI 암호화.
+  view.json       : 창 크기, 열 너비, 서버별 즐겨찾기.
+  explorer-날짜.log : 연결·조회·추출 결과. 비밀번호/전체 연결 문자열을 기록하지 않음.
+현재 목록은 5,000개씩 유지하며 추가 페이지를 계속 읽을 수 있습니다. 전체 결과 추출에는 이 표시 한도가 없습니다.
+열 정렬은 현재 표시된 목록에 적용됩니다. 여러 DB의 동시 원자적 스냅샷을 보장하지 않습니다.
+
+개발과 검증
+VS2022 17.12 이상 + .NET 9 SDK: AOI-NasExplorer.sln을 열어 개발 호환 타깃을 빌드할 수 있습니다.
+  powershell -File tools\Build.ps1
+배포용은 .NET 10 SDK로 만들며 .NET 10 런타임을 함께 담습니다.
+  powershell -File tools\Build.ps1 -Dotnet <NET10_DOTNET_EXE> -Framework net10.0 -Publish -OutputDir <OUTPUT>
+새 프로그램의 .NET 10 배포본 실행에 VS2022나 .NET 9 설치는 필요하지 않습니다.
+net9는 개발 호환용이며 배포용 Publish는 net10만 허용합니다.
+
+작은 격리 DB 시험
+  tools\Test-Isolated.ps1 -WorkDir <PRIVATE_WORK> -SchemaFile <SANITIZED_SCHEMA_SQL>
+대량·회수 DB 시험
+  tools\Test-Nightly.ps1 -WorkDir <PRIVATE_WORK> -SchemaFile <SANITIZED_SCHEMA_SQL> -DumpFile <PGDMP> -Dotnet <NET10_DOTNET_EXE>
+시험은 전용 localhost 포트(55000~55999), 소유 확인 파일이 있는 별도 클러스터에서만 수행합니다.
+2026-11-04 22:00 KST 이전에는 대량 시험을 실행할 수 없도록 시간 보호가 있습니다.
+회수 덤프 복원 시 --no-subscriptions --no-publications --no-owner --no-privileges를 적용합니다.
+기존 PostgreSQL 서비스와 운영 NAS는 시험 대상이 아닙니다.
+
+현재 검증 결과는 outputs의 검증 보고서와 C:\stemco\00_AI\NAS_DB_독립조회프로그램\00_인수인계.md에서 확인합니다.
+제품 출시/실NAS/현장 검증 여부는 작은 합성 DB 시험 통과와 구분합니다.

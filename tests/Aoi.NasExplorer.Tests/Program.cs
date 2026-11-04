@@ -1,0 +1,262 @@
+using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
+using Aoi.NasExplorer.Core;
+using Aoi.NasExplorer.Data;
+using Aoi.NasExplorer.Export;
+using Npgsql;
+
+internal static class Program
+{
+    private static readonly List<object> Outcomes=[];
+    private static int _failures;
+    private static void Equal<T>(T expected,T actual){if(!EqualityComparer<T>.Default.Equals(expected,actual))throw new Exception($"expected={expected}; actual={actual}");}
+    private static void True(bool condition){if(!condition)throw new Exception("assertion failed");}
+    private static void Throws<T>(Action action) where T:Exception{try{action();}catch(T){return;}throw new Exception($"Expected {typeof(T).Name}");}
+    private static async Task Check(string name,Func<Task> action)
+    {var clock=Stopwatch.StartNew();try{await action();Outcomes.Add(new{name,status="passed",ms=clock.ElapsedMilliseconds});Console.WriteLine("PASS "+name);}catch(Exception ex){_failures++;Outcomes.Add(new{name,status="failed",error=ExplorerRepository.SafeError(ex),ms=clock.ElapsedMilliseconds});Console.WriteLine("FAIL "+name+": "+ExplorerRepository.SafeError(ex));}}
+    private static Task Check(string name,Action action)=>Check(name,()=>{action();return Task.CompletedTask;});
+    public static async Task<int> Main(string[] args)
+    {
+        string output=Environment.GetEnvironmentVariable("NAS_TEST_OUTPUT")??Path.Combine(Path.GetTempPath(),"nas-explorer-tests");Directory.CreateDirectory(output);
+        if(!args.Contains("--recovered"))await UnitAsync(output);
+        if(args.Contains("--integration"))await IntegrationAsync(output);
+        if(args.Contains("--stress"))await StressAsync(output);
+        if(args.Contains("--recovered"))await RecoveredAsync(output);
+        await File.WriteAllTextAsync(Path.Combine(output,"test-results.json"),JsonSerializer.Serialize(new{endedAt=DateTimeOffset.Now,failures=_failures,tests=Outcomes},new JsonSerializerOptions{WriteIndented=true}));
+        Console.WriteLine($"Tests: {Outcomes.Count}; failed: {_failures}");return _failures==0?0:1;
+    }
+    private static async Task UnitAsync(string output)
+    {
+        await Check("profile rejects empty host",()=>Throws<ArgumentException>(()=>new ConnectionProfile().Validate()));
+        await Check("profile rejects multiple hosts",()=>Throws<ArgumentException>(()=>new ConnectionProfile{Host="a,b"}.Validate()));
+        await Check("profile rejects invalid port",()=>Throws<ArgumentException>(()=>new ConnectionProfile{Host="a",Port=0}.Validate()));
+        await Check("query rejects reversed dates",()=>Throws<ArgumentException>(()=>new SearchFilter{From=new(2026,11,4),UntilExclusive=new(2026,11,3)}.Validate()));
+        await Check("query rejects NaN",()=>Throws<ArgumentException>(()=>new SearchFilter{MinimumSize=double.NaN}.Validate()));
+        await Check("connection strings escape password delimiters",()=>{var p=new ConnectionProfile{Host="127.0.0.1",Password="a;b='quoted'"};var b=new NpgsqlConnectionStringBuilder(ExplorerRepository.ConnectionString(p,"test"));Equal(p.Password,b.Password);True(b.Options!.Contains("default_transaction_read_only=on"));Equal(3,b.MaxPoolSize);True(!b.IncludeErrorDetail);});
+        await Check("LIKE literal percent and underscore",()=>Equal("%a!%!_!!%",ExplorerRepository.Like("a%_!")));
+        await Check("CSV quote and newline",()=>Equal("\"a\"\"b\nc\"",ExportService.CsvCell("a\"b\nc")));
+        await Check("CSV spreadsheet formula escaped",()=>Equal("\"'=1+2\"",ExportService.CsvCell("=1+2")));
+        await Check("CSV negative numeric remains numeric",()=>Equal("\"-2.5\"",ExportService.CsvCell(-2.5)));
+        await Check("safe paths prevent traversal",()=>{string path=ExportService.SafeComponent("../a\\b:bad");True(!path.Contains('/')&&!path.Contains('\\')&&!path.Contains(':'));});
+        await Check("sanitized filename collisions distinguished",()=>True(ExportService.SafeComponent("a/b")!=ExportService.SafeComponent("a\\b")));
+        await Check("reserved Windows names escaped",()=>True(ExportService.SafeComponent("CON").StartsWith('_')));
+        await Check("raw dimensions take priority over hex marker",()=>{byte[] b=[92,120,48,48];True(ReferenceEquals(b,ImageBytes.Normalize(b,2,2,1)));});
+        await Check("bytea hex decoded",()=>True(ImageBytes.Normalize("\\x00ff"u8.ToArray(),0,0,1).SequenceEqual(new byte[]{0,255})));
+        await Check("malformed hex diagnosed",()=>Throws<InvalidDataException>(()=>ImageBytes.Normalize("\\xzz"u8.ToArray(),0,0,1)));
+        await Check("PNG signature detected",()=>Equal(".png",ImageBytes.Extension(new byte[]{137,80,78,71,13,10,26,10})));
+        await Check("raw signature remains raw",()=>Equal(".raw",ImageBytes.Extension(new byte[]{0,1,2})));
+        await Check("database is part of row identity",()=>{var a=new ResultRow{Database="a",Values=new(){["defects"]=1}};var b=new ResultRow{Database="b",Values=new(){["defects"]=1}};True(a.Key("nas",BrowseLevel.Defects)!=b.Key("nas",BrowseLevel.Defects));});
+        await Check("JSON preserves null and zero",()=>{string j=ExportService.Json(new(){Database="a",Values=new(){["missing"]=null,["zero"]=0}});True(j.Contains("\"missing\": null")&&j.Contains("\"zero\": 0"));});
+        var g=new ModelGeometry(2.2,0,0,100,100,new double[]{0},new double[]{0},100,100,new double[]{10,30},new double[]{10,30},10,10,100,100);
+        var row=new ResultRow{Database="a",Values=new(){["defects"]=1,["unit_idx"]=1,["unit_x"]=1,["unit_y"]=1,["raw_x"]=1.5,["raw_y"]=2.5,["cad_x"]=3.9,["cad_y"]=4.1,["defect_type"]=2,["vms_state"]=1,["vms_code"]=4,["source_metadata_version"]=1,["source_block_idx"]=2,["source_axis_x"]=3,["source_axis_y"]=4}};
+        await Check("ERT raw coordinates integer CAD and source block",()=>{var ert=ErtExporter.Render("C:\\test","model","lot","L1",1,new(2026,11,4,9,1,2),"VMS_COMPLETED",1,g,new[]{row});True(ert.Text.Contains("1.500000, 2.500000, 2, 0, 1, 3, 4")&&ert.Text.Contains(", 4, 1, , , B, -1, -1, 4, 3,"));Equal(5,ert.Text.Split("\r\n",StringSplitOptions.RemoveEmptyEntries).Length);});
+        await Check("ERT no-defect panel retained",()=>{var ert=ErtExporter.Render("C:\\test","model","lot","L1",2,new(2026,11,4),"COMPLETED",null,g,Array.Empty<ResultRow>());True(ert.Text.StartsWith("4.3.1, 0,"));Equal(4,ert.Text.Split("\r\n",StringSplitOptions.RemoveEmptyEntries).Length);});
+        await Check("ERT missing size explicitly noted",()=>True(ErtExporter.Render("C:\\test","m","l","L1",1,new(2026,11,4),"COMPLETED",1,g,new[]{row}).Notes.Any(x=>x.Contains("크기 미기록"))));
+        await Check("ERT rejects comma in header fields",()=>Throws<InvalidDataException>(()=>ErtExporter.Render("C:\\test","m,x","l","L1",1,new(2026,11,4),"COMPLETED",1,g,new[]{row})));
+        await Check("ERT missing raw coordinates cannot be invented",()=>{var values=new Dictionary<string,object?>(row.Values);values["raw_x"]=null;Throws<InvalidDataException>(()=>ErtExporter.Render("C:\\test","m","l","L1",1,new(2026,11,4),"COMPLETED",1,g,new[]{new ResultRow{Values=values}}));});
+        await Check("geometry excludes configured punch units",()=>Equal(3,(g with{PunchApply=true,PunchUnits=new[]{1}}).TotalUnits));
+        await Check("atomic output never overwrites existing file",async()=>{string path=Path.Combine(output,"existing.txt");await File.WriteAllTextAsync(path,"original");try{await ExportService.WriteNewAsync(path,"new",default);throw new Exception("Expected IOException");}catch(IOException){}Equal("original",await File.ReadAllTextAsync(path));});
+        await Check("CSV streams all input and writes provenance",async()=>{string path=Path.Combine(output,"csv-"+Guid.NewGuid().ToString("N")+".csv");long count=await ExportService.CsvAsync(path,ExportService.Enumerate(new[]{row,row}),default);Equal(2L,count);True((await File.ReadAllTextAsync(path)).StartsWith("\"source_database\","));});
+        await Check("cancelled CSV not exposed as completed output",async()=>{string path=Path.Combine(output,"cancel-"+Guid.NewGuid().ToString("N")+".csv");using var cts=new CancellationTokenSource();cts.Cancel();try{await ExportService.CsvAsync(path,ExportService.Enumerate(new[]{row}),cts.Token);throw new Exception("Expected cancellation");}catch(OperationCanceledException){}True(!File.Exists(path));});
+        await Check("streamed ERT is identical to in-memory reference",async()=>
+        {
+            string path=Path.Combine(output,"stream-"+Guid.NewGuid().ToString("N"),"001.ert");string folder=Path.GetDirectoryName(path)!;
+            var expected=ErtExporter.Render(folder,"model","lot","L1",1,new(2026,11,4,9,1,2),"VMS_COMPLETED",1,g,new[]{row});
+            var result=await ErtExporter.WriteStreamingAsync(path,"model","lot","L1",1,new(2026,11,4,9,1,2),"VMS_COMPLETED",1,g,1,ExportService.Enumerate(new[]{row}),new UTF8Encoding(false),default);
+            Equal(expected.Text,await File.ReadAllTextAsync(path));Equal(1,result.Rows);
+        });
+        await Check("streamed ERT mismatch preserves partial and no completed file",async()=>
+        {
+            string path=Path.Combine(output,"mismatch-"+Guid.NewGuid().ToString("N"),"001.ert");
+            try{await ErtExporter.WriteStreamingAsync(path,"model","lot","L1",1,new(2026,11,4),"COMPLETED",1,g,2,ExportService.Enumerate(new[]{row}),new UTF8Encoding(false),default);throw new Exception("Expected mismatch");}catch(InvalidDataException){}
+            True(!File.Exists(path));True(Directory.GetFiles(Path.GetDirectoryName(path)!,"*.partial-*").Length==1);
+        });
+    }
+    private static ConnectionProfile TestProfile()
+    {
+        if(!int.TryParse(Environment.GetEnvironmentVariable("NAS_TEST_PORT"),out int port)||port is <55000 or >55999)throw new Exception("NAS_TEST_PORT must identify the private test server (55000..55999).");
+        return new(){Host="127.0.0.1",Port=port,Username="nas_test",Password=File.ReadAllText(Environment.GetEnvironmentVariable("NAS_TEST_PASSWORD_FILE")??throw new Exception("password file missing")).TrimEnd(),SslMode="Disable",TimeoutSeconds=10};
+    }
+    private static async Task Admin(ConnectionProfile p,string db,string sql)
+    {
+        var b=new NpgsqlConnectionStringBuilder{Host="127.0.0.1",Port=p.Port,Username=p.Username,Password=p.Password,Database=db,Pooling=false,CommandTimeout=120};
+        await using var c=new NpgsqlConnection(b.ConnectionString);await c.OpenAsync();await using var cmd=new NpgsqlCommand(sql,c);await cmd.ExecuteNonQueryAsync();
+    }
+    private static async Task IntegrationAsync(string output)
+    {
+        var p=TestProfile();string schemaPath=Environment.GetEnvironmentVariable("NAS_TEST_SCHEMA")??throw new Exception("schema path missing");
+        string schema=string.Join('\n',(await File.ReadAllLinesAsync(schemaPath)).Where(x=>!x.StartsWith('\\')));
+        if(schema.Contains("SUBSCRIPTION",StringComparison.OrdinalIgnoreCase)||schema.Contains("PUBLICATION",StringComparison.OrdinalIgnoreCase))throw new Exception("Replication DDL must be excluded before testing.");
+        foreach(string db in new[]{"aoi_20990101","aoi_20990102","aoi_legacy","aoi_config","aoi_model"})
+        {
+            try{await Admin(p,"postgres",$"CREATE DATABASE \"{db}\"");}catch(PostgresException ex) when(ex.SqlState=="42P04"){}
+        }
+        foreach(string db in new[]{"aoi_20990101","aoi_20990102","aoi_legacy"})
+        {
+            await Admin(p,db,"DROP SCHEMA public CASCADE; CREATE SCHEMA public;");await Admin(p,db,schema);
+            await Admin(p,db,"""
+INSERT INTO lot_id(lot_id,lot_id_name,model_name,time,status) VALUES (1,'LOT_A','MODEL_A','2026-11-01','ACTIVE'),(2,'LOT_B','MODEL_B','2026-11-02','VMS_COMPLETED'),(3,'LITERAL_%','MODEL_A','2026-11-01','ACTIVE'),(4,'NO_INSPECTION','MODEL_A','2026-11-01','ACTIVE');
+INSERT INTO layer(layer,layer_name,model_name,lot_id,vms_status) VALUES (1,'L1','MODEL_A',1,'VMS_COMPLETED'),(2,'L1','MODEL_B',2,'VMS_COMPLETED');
+INSERT INTO inspection(inspection,layer,machine_id,pc_no,panel_no,time,status,fov_count) VALUES (1,1,'EQ09',1,1,'2026-11-02 23:59:59','COMPLETED',1),(2,1,'EQ09',1,1,'2026-11-03 10:00','VMS_COMPLETED',1),(3,1,'EQ09',2,1,'2026-11-03 10:00','VMS_COMPLETED',1),(4,1,'EQ10',1,1,'2026-11-03 10:00','START',1),(5,2,'EQ09',1,1,'2026-11-03 10:00','VMS_COMPLETED',1);
+INSERT INTO defects(defects,inspection,unit_idx,unit_x,unit_y,raw_x,raw_y,cad_x,cad_y,defect_type,vms_state,vms_code,image,image_width,image_height,image_channels,cause_code,cause_key,defect_size,source_metadata_version,source_block_idx,source_axis_x,source_axis_y)
+VALUES (1,1,1,1,1,10,20,30,40,1,0,0,decode('00010203','hex'),2,2,1,NULL,NULL,NULL,1,1,1,1),
+(2,2,2,1,2,11,21,31,41,2,1,4,NULL,0,0,1,4001,'PINHOLE_MIN_SIZE',0,1,1,1,2),
+(3,3,3,2,1,12,22,32,42,2,2,0,decode('11223344','hex'),2,2,1,4001,'PINHOLE_MIN_SIZE',2.5,1,1,2,1),
+(4,4,4,2,2,13,23,33,43,3,0,0,NULL,0,0,1,NULL,NULL,NULL,1,1,2,2),
+(5,5,1,1,1,14,24,34,44,1,1,1,NULL,0,0,1,NULL,NULL,NULL,1,1,1,1);
+""");
+        }
+        await Admin(p,"aoi_legacy","ALTER TABLE defects DROP COLUMN cause_code,DROP COLUMN cause_key,DROP COLUMN defect_size,DROP COLUMN defect_extra,DROP COLUMN image_width,DROP COLUMN image_height,DROP COLUMN image_channels,DROP COLUMN source_metadata_version,DROP COLUMN source_block_idx,DROP COLUMN source_axis_x,DROP COLUMN source_axis_y;");
+        await Admin(p,"aoi_config","CREATE TABLE IF NOT EXISTS db_status(db_name text primary key,status text); TRUNCATE db_status; INSERT INTO db_status VALUES ('aoi_20990101','ARCHIVE'),('aoi_20990102','ACTIVE');");
+        await Admin(p,"aoi_model","""
+DROP SCHEMA public CASCADE; CREATE SCHEMA public;
+CREATE TABLE aoi_model(model_id bigint,model_name text); INSERT INTO aoi_model VALUES(1,'MODEL_A');
+CREATE TABLE aoi_block_pos(model_id bigint,image_resolution double precision,x double precision[],y double precision[],width double precision[],height double precision[]); INSERT INTO aoi_block_pos VALUES(1,2.2,ARRAY[0.]::float8[],ARRAY[0.]::float8[],ARRAY[100.]::float8[],ARRAY[100.]::float8[]);
+CREATE TABLE aoi_cellunits(model_id bigint,frame_pos double precision[],unit_pos double precision[]); INSERT INTO aoi_cellunits VALUES(1,ARRAY[10.,30.]::float8[],ARRAY[10.,30.]::float8[]);
+CREATE TABLE aoi_elem_unit(model_id bigint,x double precision[],width double precision[],height double precision[]); INSERT INTO aoi_elem_unit VALUES(1,ARRAY[0.]::float8[],ARRAY[10.]::float8[],ARRAY[10.]::float8[]);
+CREATE TABLE aoi_inspect_region(model_id bigint,x double precision,y double precision,width double precision,height double precision); INSERT INTO aoi_inspect_region VALUES(1,0,0,100,100);
+CREATE TABLE aoi_punch(model_id bigint,punch_apply boolean,punch_units integer[]); INSERT INTO aoi_punch VALUES(1,false,'{}');
+""");
+        var repo=new ExplorerRepository();const string db1="aoi_20990101",db2="aoi_20990102";
+        async Task<QueryPage> Q(BrowseLevel level,SearchFilter? f=null,int count=250,string? cursor=null,string db=db1)=>await repo.QueryAsync(p,db,level,f??new(),count,cursor,default);
+        await Check("discovery finds archived and active DB without writes",async()=>{var dbs=await repo.DiscoverAsync(p,default);True(dbs.Any(x=>x.Name==db1&&x.State=="ARCHIVE"&&x.IsInspection));True(dbs.Any(x=>x.Name==db2&&x.State=="ACTIVE"&&x.IsInspection));True(dbs.Any(x=>x.Name=="aoi_model"&&!x.IsInspection));});
+        await Check("models are distinct and pageable",async()=>{var first=await Q(BrowseLevel.Models,count:1);True(first.HasMore);Equal("MODEL_A",first.Rows[0].Text("model_name"));Equal("MODEL_B",(await Q(BrowseLevel.Models,count:1,cursor:first.Cursor)).Rows[0].Text("model_name"));});
+        await Check("lots without inspections retained",async()=>Equal(4,(await Q(BrowseLevel.Lots)).Rows.Count));
+        await Check("literal wildcard search does not broaden",async()=>Equal(1,(await Q(BrowseLevel.Lots,new(){Text="_%"})).Rows.Count));
+        await Check("SQL injection remains a search string",async()=>Equal(0,(await Q(BrowseLevel.Lots,new(){Text="'; DROP TABLE defects; --"})).Rows.Count));
+        await Check("model prevents same layer name mixing",async()=>Equal(1,(await Q(BrowseLevel.Layers,new(){Model="MODEL_A"})).Rows.Count));
+        await Check("PC and machine histories stay separate",async()=>Equal(5,(await Q(BrowseLevel.Inspections)).Rows.Count));
+        await Check("latest keeps other PCs and machines",async()=>Equal(4,(await Q(BrowseLevel.Inspections,new(){LatestOnly=true})).Rows.Count));
+        await Check("date filter uses inspection time not lot time",async()=>Equal(4,(await Q(BrowseLevel.Inspections,new(){From=new(2026,11,3),UntilExclusive=new(2026,11,4)})).Rows.Count));
+        await Check("half-open date excludes next day",async()=>Equal(1,(await Q(BrowseLevel.Inspections,new(){From=new(2026,11,2),UntilExclusive=new(2026,11,3)})).Rows.Count));
+        await Check("defect page cursor no duplicates",async()=>{var all=new List<string>();string? cursor=null;do{var page=await Q(BrowseLevel.Defects,count:2,cursor:cursor);all.AddRange(page.Rows.Select(x=>x.Text("defects")));cursor=page.Cursor;}while(cursor is not null);Equal(5,all.Count);Equal(5,all.Distinct().Count());});
+        await Check("metadata list never selects image bytes",async()=>{var page=await Q(BrowseLevel.Defects);True(page.Rows.All(x=>!x.Values.ContainsKey("image")));True(page.Rows[0]["d_attr"] is null);});
+        await Check("detail preserves NULL and actual zero",async()=>{var a=await repo.DetailAsync(p,new(p.Identity,db1,"defects","1"),default);var b=await repo.DetailAsync(p,new(p.Identity,db1,"defects","2"),default);True(a["defect_size"] is null);Equal(0.0,b.Number("defect_size"));});
+        await Check("image lookup uses physical source DB",async()=>{await Admin(p,db2,"UPDATE defects SET image=decode('aabbccdd','hex') WHERE defects=1");var a=await repo.ImageAsync(p,new(p.Identity,db1,"defects","1"),default);var b=await repo.ImageAsync(p,new(p.Identity,db2,"defects","1"),default);True(a!.Bytes[0]!=b!.Bytes[0]);Equal(2,a.Width);});
+        await Check("missing image is not a decode error",async()=>True(await repo.ImageAsync(p,new(p.Identity,db1,"defects","2"),default) is null));
+        await Check("image-present filter",async()=>Equal(2,(await Q(BrowseLevel.Defects,new(){Images=ImageFilter.Present})).Rows.Count));
+        await Check("zero is a valid size filter",async()=>Equal(1,(await Q(BrowseLevel.Defects,new(){MinimumSize=0,MaximumSize=0})).Rows.Count));
+        await Check("cause code and VMS state filter",async()=>Equal(1,(await Q(BrowseLevel.Defects,new(){CauseCode=4001,VmsState=1})).Rows.Count));
+        await Check("incomplete inspection is visible",async()=>Equal("START",(await Q(BrowseLevel.Inspections,new(){Machine="EQ10"})).Rows.Single().Text("inspection_status")));
+        await Check("exact inspection confines defects",async()=>Equal("3",(await Q(BrowseLevel.Defects,new(){InspectionId="3"})).Rows.Single().Text("defects")));
+        await Check("legacy schema lists safely with missing-field markers",async()=>{var page=await Q(BrowseLevel.Defects,db:"aoi_legacy");Equal(5,page.Rows.Count);True(page.Rows[0].Text("missing_fields").Contains("defect_size"));});
+        await Check("legacy optional filter yields no invented data",async()=>Equal(0,(await Q(BrowseLevel.Defects,new(){MinimumSize=0},db:"aoi_legacy")).Rows.Count));
+        await Check("legacy raw image dimensions remain unknown",async()=>{var image=await repo.ImageAsync(p,new(p.Identity,"aoi_legacy","defects","1"),default);Equal(0,image!.Width);});
+        await Check("invalid table name rejected",async()=>{try{await repo.DetailAsync(p,new(p.Identity,db1,"defects;DROP","1"),default);throw new Exception("Expected ArgumentException");}catch(ArgumentException){}});
+        await Check("read-only startup setting rejects INSERT",async()=>{await using var c=new NpgsqlConnection(ExplorerRepository.ConnectionString(p,db1));await c.OpenAsync();await using var cmd=new NpgsqlCommand("INSERT INTO lot_id(lot_id_name,model_name) VALUES('SHOULD_NOT_EXIST','x')",c);try{await cmd.ExecuteNonQueryAsync();throw new Exception("write unexpectedly allowed");}catch(PostgresException ex){Equal("25006",ex.SqlState);}});
+        await Check("cancelled query does not succeed",async()=>{using var cts=new CancellationTokenSource();cts.Cancel();try{await repo.QueryAsync(p,db1,BrowseLevel.Defects,new(),10,null,cts.Token);throw new Exception("Expected cancellation");}catch(OperationCanceledException){}});
+        await Check("model geometry from separate model DB",async()=>Equal(4,(await repo.GeometryAsync(p,"MODEL_A",default)).TotalUnits));
+        await Check("ERT reconstruction preserves selected record only",async()=>{var rows=(await Q(BrowseLevel.Defects,new(){InspectionId="2"})).Rows;var ert=ErtExporter.Render("C:\\test","MODEL_A","LOT_A","L1",1,new(2026,11,3),"VMS_COMPLETED",1,await repo.GeometryAsync(p,"MODEL_A",default),rows);True(ert.Text.StartsWith("4.3.1, 1,"));True(ert.Text.Contains("11.000000, 21.000000"));});
+        await Check("all-result CSV streams across overlapping IDs",async()=>{async IAsyncEnumerable<ResultRow> All(){foreach(var db in new[]{db1,db2}){string? cur=null;do{var page=await Q(BrowseLevel.Defects,count:2,cursor:cur,db:db);foreach(var row in page.Rows)yield return row;cur=page.Cursor;}while(cur is not null);}}string path=Path.Combine(output,"integration-"+Guid.NewGuid().ToString("N")+".csv");Equal(10L,await ExportService.CsvAsync(path,All(),default));});
+        // UUID schema is isolated and validates older pre-BIGSERIAL deployments without changing any real DB.
+        try{await Admin(p,"postgres","CREATE DATABASE aoi_uuid");}catch(PostgresException ex)when(ex.SqlState=="42P04"){}
+        await Admin(p,"aoi_uuid","""
+DROP SCHEMA public CASCADE;CREATE SCHEMA public;
+CREATE TABLE lot_id(lot_id uuid PRIMARY KEY,lot_id_name text,model_name text,time timestamp,status text);
+CREATE TABLE layer(layer uuid PRIMARY KEY,lot_id uuid,layer_name text,model_name text,vms_status text);
+CREATE TABLE inspection(inspection uuid PRIMARY KEY,layer uuid,machine_id text,pc_no int,panel_no int,time timestamp,status text);
+CREATE TABLE defects(defects uuid PRIMARY KEY,inspection uuid,unit_idx int,unit_x int,unit_y int,defect_type int,vms_state int,vms_code int,image bytea);
+""");
+        await Admin(p,"aoi_uuid","INSERT INTO lot_id VALUES('00000000-0000-0000-0000-000000000001','UUID_LOT','UUID_MODEL',now(),'ACTIVE');");
+        await Check("UUID primary key lookup supported",async()=>{var first=await Q(BrowseLevel.Lots,db:"aoi_uuid");var detail=await repo.DetailAsync(p,first.Rows[0].Key(p.Identity,BrowseLevel.Lots),default);Equal("UUID_LOT",detail.Text("lot_id_name"));});
+        await Check("ERT snapshot count and rows stay consistent during concurrent insert",async()=>
+        {
+            try
+            {
+                await repo.StreamInspectionAsync(p,db1,"2",async(count,rows,ct)=>
+                {
+                    Equal(1L,count);await Admin(p,db1,"INSERT INTO defects(defects,inspection,unit_idx) VALUES(999,2,999)");
+                    int actual=0;await foreach(var row in rows.WithCancellation(ct)){actual++;True(!row.Values.ContainsKey("image"));}Equal(1,actual);
+                },default);
+            }
+            finally{await Admin(p,db1,"DELETE FROM defects WHERE defects=999");}
+        });
+        await Check("connection pools stay bounded across changing profiles",async()=>
+        {
+            for(int timeout=10;timeout<24;timeout++)Equal(2,(await repo.QueryAsync(p with{TimeoutSeconds=timeout},db1,BrowseLevel.Models,new(),10,null,default)).Rows.Count);
+            Equal(2,(await repo.QueryAsync(p,db1,BrowseLevel.Models,new(),10,null,default)).Rows.Count);
+        });
+    }
+    private static async Task StressAsync(string output)
+    {
+        DateTime korea=DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(9)).DateTime;
+        if(korea.Date==new DateTime(2026,11,4)&&korea.Hour<22)throw new Exception("Heavy tests are prohibited before 2026-11-04 22:00 KST.");
+        var p=TestProfile();var repo=new ExplorerRepository();
+        await Check("200k defect paging and streaming export",async()=>
+        {
+            await Admin(p,"aoi_20990102","INSERT INTO defects(defects,inspection,unit_idx,unit_x,unit_y,defect_type,vms_state,vms_code) SELECT n,2,n%1000,1,1,1,0,0 FROM generate_series(100,200099) n ON CONFLICT DO NOTHING;");
+            var sw=Stopwatch.StartNew();long total=0;string? cursor=null;
+            async IAsyncEnumerable<ResultRow> All(){do{var page=await repo.QueryAsync(p,"aoi_20990102",BrowseLevel.Defects,new(),500,cursor,default);foreach(var row in page.Rows){total++;yield return row;}cursor=page.Cursor;}while(cursor is not null);}
+            long count=await ExportService.CsvAsync(Path.Combine(output,"stress-"+Guid.NewGuid().ToString("N")+".csv"),All(),default);True(count>=200000);Console.WriteLine($"Stress rows={total}; seconds={sw.Elapsed.TotalSeconds:F2}; workingSet={Environment.WorkingSet/1024/1024}MB");
+        });
+        await Check("one million rows stream with bounded client memory",async()=>
+        {
+            await Admin(p,"aoi_20990102","INSERT INTO defects(defects,inspection,unit_idx,unit_x,unit_y,defect_type,vms_state,vms_code) SELECT n,2,n%1000,1,1,1,0,0 FROM generate_series(200100,1000099) n ON CONFLICT DO NOTHING;");
+            long count=0;string? cursor=null;var sw=Stopwatch.StartNew();long peak=0;
+            do{var page=await repo.QueryAsync(p,"aoi_20990102",BrowseLevel.Defects,new(),1000,cursor,default);count+=page.Rows.Count;cursor=page.Cursor;peak=Math.Max(peak,Environment.WorkingSet);}while(cursor is not null);
+            True(count>=1000000);True(peak<768L*1024*1024);
+            await File.WriteAllTextAsync(Path.Combine(output,"million-row-metrics.json"),JsonSerializer.Serialize(new{rows=count,seconds=sw.Elapsed.TotalSeconds,peakClientWorkingSetBytes=peak}));
+        });
+        await Check("cancellation releases a pooled connection for next query",async()=>
+        {
+            await using(var c=new NpgsqlConnection(ExplorerRepository.ConnectionString(p,"aoi_20990102")))
+            {
+                await c.OpenAsync();await using var command=new NpgsqlCommand("SELECT pg_sleep(10)",c);using var cts=new CancellationTokenSource(100);
+                try{await command.ExecuteScalarAsync(cts.Token);throw new Exception("Expected cancellation");}catch(OperationCanceledException){}
+            }
+            Equal(10,(await repo.QueryAsync(p,"aoi_20990102",BrowseLevel.Defects,new(),10,null,default)).Rows.Count);
+        });
+        await Check("repeated page navigation does not retain old pages",async()=>
+        {
+            GC.Collect();GC.WaitForPendingFinalizers();GC.Collect();long start=GC.GetTotalMemory(true);
+            for(int i=0;i<200;i++)await repo.QueryAsync(p,"aoi_20990102",BrowseLevel.Defects,new(),250,(100+i*250).ToString(),default);
+            GC.Collect();GC.WaitForPendingFinalizers();GC.Collect();long delta=GC.GetTotalMemory(true)-start;True(delta<64L*1024*1024);
+        });
+    }
+    private static async Task RecoveredAsync(string output)
+    {
+        DateTime korea=DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(9)).DateTime;
+        if(korea.Date==new DateTime(2026,11,4)&&korea.Hour<22)throw new Exception("Recovered dump verification is prohibited before 22:00 KST.");
+        var p=TestProfile();string db=Environment.GetEnvironmentVariable("NAS_RECOVERED_DATABASE")??throw new Exception("Recovered database missing");
+        if(!db.StartsWith("nas_recovered_",StringComparison.Ordinal))throw new Exception("Only a private restored database is permitted.");
+        var repo=new ExplorerRepository();var baseline=new Dictionary<string,long>();
+        await using(var c=new NpgsqlConnection(new NpgsqlConnectionStringBuilder{Host=p.Host,Port=p.Port,Username=p.Username,Password=p.Password,Database=db,Pooling=false,CommandTimeout=120}.ConnectionString))
+        {
+            await c.OpenAsync();foreach(string table in new[]{"lot_id","layer","inspection","defects"})
+            {await using var cmd=new NpgsqlCommand($"SELECT COUNT(*) FROM public.{table}",c);baseline[table]=Convert.ToInt64(await cmd.ExecuteScalarAsync());}
+            await Check("restored dump has no subscriptions or publications",async()=>
+            {await using var cmd=new NpgsqlCommand("SELECT (SELECT count(*) FROM pg_subscription WHERE subdbid=(SELECT oid FROM pg_database WHERE datname=current_database()))+(SELECT count(*) FROM pg_publication)",c);Equal(0L,Convert.ToInt64(await cmd.ExecuteScalarAsync()));});
+        }
+        var metrics=new List<object>();
+        foreach(var pair in new[]{(BrowseLevel.Lots,"lot_id"),(BrowseLevel.Layers,"layer"),(BrowseLevel.Inspections,"inspection"),(BrowseLevel.Defects,"defects")})
+        {
+            await Check("recovered exact row count: "+pair.Item2,async()=>
+            {
+                long count=0;string? cursor=null;var clock=Stopwatch.StartNew();
+                do{var page=await repo.QueryAsync(p,db,pair.Item1,new(),1000,cursor,default);count+=page.Rows.Count;True(page.Rows.All(x=>x.Database==db&&!x.Values.ContainsKey("image")));cursor=page.Cursor;}while(cursor is not null);
+                Equal(baseline[pair.Item2],count);metrics.Add(new{table=pair.Item2,rows=count,seconds=clock.Elapsed.TotalSeconds});
+            });
+        }
+        await Check("recovered list and raw detail agree",async()=>
+        {
+            var first=await repo.QueryAsync(p,db,BrowseLevel.Defects,new(),30,null,default);
+            foreach(var row in first.Rows)
+            {var detail=await repo.DetailAsync(p,row.Key(p.Identity,BrowseLevel.Defects),default);foreach(string field in new[]{"raw_x","raw_y","defect_type","unit_idx","vms_code","cause_code","defect_size"})if(detail.Values.ContainsKey(field))Equal(detail.Text(field),row.Text(field));}
+        });
+        await Check("recovered actual images keep source IDs and metadata",async()=>
+        {
+            var first=await repo.QueryAsync(p,db,BrowseLevel.Defects,new(){Images=ImageFilter.Present},64,null,default);int encoded=0,raw=0,unknown=0;
+            foreach(var row in first.Rows)
+            {var image=await repo.ImageAsync(p,row.Key(p.Identity,BrowseLevel.Defects),default);True(image is not null&&image.Bytes.Length>0);Equal(db,image!.Database);byte[] bytes=ImageBytes.Normalize(image.Bytes,image.Width,image.Height,image.Channels);if(image.Width>0&&image.Height>0&&(long)image.Width*image.Height*image.Channels==bytes.Length)raw++;else if(ImageBytes.Extension(bytes)!=".raw")encoded++;else unknown++;}
+            await File.WriteAllTextAsync(Path.Combine(output,"real-image-metadata.json"),JsonSerializer.Serialize(new{sampled=first.Rows.Count,encoded,raw,unknown}));
+            True(first.Rows.Count>0);
+        });
+        await Check("recovered full CSV count matches database",async()=>
+        {
+            async IAsyncEnumerable<ResultRow> All(){string? cursor=null;do{var page=await repo.QueryAsync(p,db,BrowseLevel.Defects,new(),1000,cursor,default);foreach(var row in page.Rows)yield return row;cursor=page.Cursor;}while(cursor is not null);}
+            long count=await ExportService.CsvAsync(Path.Combine(output,"회수DB_불량전체.csv"),All(),default);Equal(baseline["defects"],count);
+        });
+        await File.WriteAllTextAsync(Path.Combine(output,"recovered-counts-and-timing.json"),JsonSerializer.Serialize(new{database=db,baseline,metrics,workingSet=Environment.WorkingSet},new JsonSerializerOptions{WriteIndented=true}));
+    }
+}

@@ -1,0 +1,7 @@
+This application uses Npgsql 8.0.7 (PostgreSQL License) and Microsoft .NET runtime/libraries.
+Npgsql: https://github.com/npgsql/npgsql/blob/v8.0.7/LICENSE
+.NET: https://github.com/dotnet/runtime/blob/main/LICENSE.TXT
+
+Npgsql license text and .NET runtime license/third-party notices are included in portable builds.
+The existing internal VisionPlatform project was read as a data-format and behavior reference.
+No HALCON or other equipment SDK is required or redistributed.

@@ -1,0 +1,14 @@
+<Project>
+  <PropertyGroup>
+    <NasTargetFramework Condition="'$(NasTargetFramework)' == ''">net9.0</NasTargetFramework>
+    <TargetFramework>$(NasTargetFramework)</TargetFramework>
+    <BaseIntermediateOutputPath>obj\$(NasTargetFramework)\</BaseIntermediateOutputPath>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**\obj\**;**\bin\**</DefaultItemExcludes>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>13</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,3 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup><ProjectReference Include="..\Aoi.NasExplorer.Core\Aoi.NasExplorer.Core.csproj" /><PackageReference Include="Npgsql" Version="8.0.7" /></ItemGroup>
+</Project>

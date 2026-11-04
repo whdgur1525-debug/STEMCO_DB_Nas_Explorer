@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>$(NasTargetFramework)-windows</TargetFramework><UseWPF>true</UseWPF><OutputType>WinExe</OutputType>
+    <AssemblyName>AOI-NasExplorer</AssemblyName><ApplicationManifest>app.manifest</ApplicationManifest>
+    <Product>Synapse NAS Explorer</Product><Description>NAS 검사 결과 읽기 전용 탐색기</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Aoi.NasExplorer.Core\Aoi.NasExplorer.Core.csproj" />
+    <ProjectReference Include="..\Aoi.NasExplorer.Data\Aoi.NasExplorer.Data.csproj" />
+    <ProjectReference Include="..\Aoi.NasExplorer.Export\Aoi.NasExplorer.Export.csproj" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" Condition="'$(NasTargetFramework)' == 'net9.0'" />
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="9.0.0" Condition="'$(NasTargetFramework)' == 'net9.0'" />
+  </ItemGroup>
+</Project>

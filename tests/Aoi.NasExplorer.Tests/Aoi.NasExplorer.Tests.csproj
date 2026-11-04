@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+ <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
+ <ItemGroup><ProjectReference Include="..\..\src\Aoi.NasExplorer.Core\Aoi.NasExplorer.Core.csproj"/><ProjectReference Include="..\..\src\Aoi.NasExplorer.Data\Aoi.NasExplorer.Data.csproj"/><ProjectReference Include="..\..\src\Aoi.NasExplorer.Export\Aoi.NasExplorer.Export.csproj"/></ItemGroup>
+</Project>
