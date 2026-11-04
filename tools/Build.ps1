@@ -13,6 +13,19 @@ if($Publish){
     if([string]::IsNullOrWhiteSpace($OutputDir)){$OutputDir=Join-Path $root 'artifacts\portable-win-x64'}
     & $Dotnet publish (Join-Path $root 'src\Aoi.NasExplorer.App\Aoi.NasExplorer.App.csproj') -c Release -r win-x64 --self-contained true -m:1 -p:NasTargetFramework=$Framework -p:UseSharedCompilation=false -p:PublishSingleFile=false -p:DebugType=None -o $OutputDir --disable-build-servers -v:minimal
     if($LASTEXITCODE -ne 0){throw 'Publish failed'}
+    Copy-Item -LiteralPath (Join-Path $root 'README.txt'),(Join-Path $root 'THIRD-PARTY-NOTICES.txt') -Destination $OutputDir
+    $licenseDir=Join-Path $OutputDir 'licenses'
+    New-Item -ItemType Directory -Path $licenseDir -Force | Out-Null
+    Get-ChildItem -LiteralPath (Join-Path $root 'licenses') -File | Copy-Item -Destination $licenseDir
+    $runtimeConfig=Get-Content -LiteralPath (Join-Path $OutputDir 'AOI-NasExplorer.runtimeconfig.json') -Raw | ConvertFrom-Json
+    $packageRoot=if($env:NUGET_PACKAGES){$env:NUGET_PACKAGES}else{Join-Path $env:USERPROFILE '.nuget\packages'}
+    foreach($frameworkInfo in $runtimeConfig.runtimeOptions.includedFrameworks){
+        $packageName=$frameworkInfo.name.ToLowerInvariant()+'.runtime.win-x64'
+        $packageDir=Join-Path (Join-Path $packageRoot $packageName) $frameworkInfo.version
+        $licenseFiles=Get-ChildItem -LiteralPath $packageDir -File | Where-Object {$_.Name -in @('LICENSE','LICENSE.TXT','THIRD-PARTY-NOTICES.TXT')}
+        if(!$licenseFiles){throw "Runtime license files not found: $packageName/$($frameworkInfo.version)"}
+        foreach($licenseFile in $licenseFiles){Copy-Item -LiteralPath $licenseFile.FullName -Destination (Join-Path $licenseDir ($frameworkInfo.name+'_'+$licenseFile.Name))}
+    }
     $commit=git -C $root rev-parse HEAD 2>$null
     [pscustomobject]@{BuiltAt=[DateTimeOffset]::Now.ToString('O');Framework=$Framework;Runtime='win-x64';SelfContained=$true;Commit=$commit;Sdk=(& $Dotnet --version)} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDir 'build-receipt.json') -Encoding utf8
     $outputRoot=[IO.Path]::GetFullPath($OutputDir)
