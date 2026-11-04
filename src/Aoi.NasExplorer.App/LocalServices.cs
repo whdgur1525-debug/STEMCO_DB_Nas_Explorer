@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -76,63 +76,3 @@ internal static class BitmapDecoderService
     }
 }
 
-internal sealed class DemoRepository : IExplorerRepository
-{
-    public Task WithSnapshotAsync(ConnectionProfile p,string db,Func<IExplorerRepository,DateTimeOffset,CancellationToken,Task> consume,CancellationToken ct)=>consume(this,DateTimeOffset.Now,ct);
-    public async IAsyncEnumerable<ResultRow> StreamAsync(ConnectionProfile p,string db,BrowseLevel level,SearchFilter filter,bool images,Action<DateTimeOffset>? captured,[System.Runtime.CompilerServices.EnumeratorCancellation]CancellationToken ct,IReadOnlySet<string>? selectedIds=null)
-    {
-        captured?.Invoke(DateTimeOffset.Now);
-        foreach(var row in (await QueryAsync(p,db,level,filter,250,null,ct)).Rows)
-        {if(selectedIds is not null&&!selectedIds.Contains(row.Key(p.Identity,level).Id))continue;if(images)row.SnapshotImage=await ImageAsync(p,row.Key(p.Identity,level),ct);yield return row;}
-    }
-    public async Task<ScopeSummary> SummaryAsync(ConnectionProfile p,string db,SearchFilter f,CancellationToken ct)
-    {
-        var rows=(await QueryAsync(p,db,BrowseLevel.Defects,f,250,null,ct)).Rows;
-        var groups=rows.GroupBy(x=>x.Text("panel_no")).Select(g=>new ResultRow{Database=db,Values=new(g.First().Values){["inspection_count"]=g.Select(x=>x.Text("inspection")).Distinct().LongCount(),["defect_count"]=g.LongCount(),["image_count"]=g.LongCount(),["vms_ng_count"]=g.LongCount(x=>x.Long("vms_state")==1),["vms_pass_count"]=g.LongCount(x=>x.Long("vms_state")==2)}}).ToArray();
-        return new((await QueryAsync(p,db,BrowseLevel.Lots,f,250,null,ct)).Rows.Count,(await QueryAsync(p,db,BrowseLevel.Inspections,f,250,null,ct)).Rows.Count,rows.Count,groups.Length,groups);
-    }
-    public Task<IReadOnlyList<DatabaseInfo>> DiscoverAsync(ConnectionProfile p,CancellationToken ct)=>Task.FromResult<IReadOnlyList<DatabaseInfo>>(new[]{new DatabaseInfo("예제_DB","예제",true)});
-    public Task<QueryPage> QueryAsync(ConnectionProfile p,string db,BrowseLevel level,SearchFilter f,int size,string? cursor,CancellationToken ct)
-    {
-        var rows=new List<ResultRow>();
-        int count=level switch{BrowseLevel.Models=>3,BrowseLevel.Lots=>12,BrowseLevel.Layers=>2,BrowseLevel.Inspections=>18,_=>72};
-        for(int i=1;i<=count;i++)
-        {
-            ct.ThrowIfCancellationRequested();
-            var row=Row(db,i); var v=row.Values;
-            if(level==BrowseLevel.Models) v=new(){["model_name"]=$"PI-DEMO-{i:D2}"};
-            if(level==BrowseLevel.Lots) v=new(){["lot_id"]=i,["model_name"]=f.Model.Length>0?f.Model:"PI-DEMO-01",["lot_id_name"]=$"LOT-20261104-{i:D3}",["lot_time"]=new DateTime(2026,11,4,8,0,0).AddMinutes(i),["lot_status"]=i%3==0?"ACTIVE":"VMS_COMPLETED"};
-            if(level==BrowseLevel.Layers) v=new(){["layer"]=i,["model_name"]="PI-DEMO-01",["lot_id_name"]="LOT-20261104-001",["layer_name"]=$"L{i}",["vms_status"]="VMS_COMPLETED",["retest_count"]=0};
-            if(level==BrowseLevel.Inspections) v=new(){["inspection"]=i,["model_name"]="PI-DEMO-01",["lot_id_name"]="LOT-20261104-001",["layer_name"]="L1",["machine_id"]="EQ09",["pc_no"]=(i-1)%3+1,["panel_no"]=(i-1)/3+1,["inspection_time"]=new DateTime(2026,11,4,9,15,0).AddSeconds(i),["inspection_status"]="VMS_COMPLETED",["handler_tact_sec"]=18.4+i/10.0,["tact_ms"]=13500};
-            if(f.Model.Length>0)v["model_name"]=f.Model;if(f.Lot.Length>0)v["lot_id_name"]=f.Lot;if(f.Layer.Length>0)v["layer_name"]=f.Layer;
-            if(f.Text.Length>0&&!(f.Target switch{SearchTarget.Lot=>ResultRow.ValueText(v.GetValueOrDefault("lot_id_name")),SearchTarget.Model=>ResultRow.ValueText(v.GetValueOrDefault("model_name")),_=>ResultRow.ValueText(v.GetValueOrDefault("lot_id_name"))+" "+ResultRow.ValueText(v.GetValueOrDefault("model_name"))}).Contains(f.Text,StringComparison.OrdinalIgnoreCase))continue;
-            if(f.Panel.HasValue&&Convert.ToInt32(v.GetValueOrDefault("panel_no",-1))!=f.Panel)continue;
-            if(f.InspectionId.Length>0&&ResultRow.ValueText(v.GetValueOrDefault("inspection"))!=f.InspectionId)continue;
-            rows.Add(new(){Database=db,Values=v});
-        }
-        return Task.FromResult(new QueryPage(rows.Take(size).ToArray(),false,null));
-    }
-    private static ResultRow Row(string db,int i)=>new(){Database=db,Values=new()
-    {
-        ["defects"]=i,["inspection"]=(i-1)/12+1,["model_name"]="PI-DEMO-01",["lot_id_name"]="LOT-20261104-001",["layer_name"]="L1",["machine_id"]="EQ09",["pc_no"]=(i-1)%3+1,["panel_no"]=(i-1)/12+1,
-        ["inspection_time"]=new DateTime(2026,11,4,9,15,0).AddSeconds(i),["inspection_status"]="VMS_COMPLETED",["unit_idx"]=i,["unit_x"]=i%8+1,["unit_y"]=i%12+1,["defect_type"]=i%3+1,["vms_state"]=i%3,["vms_code"]=i%4,["ai_code"]=0,
-        ["cause_code"]=i%2==0?4001:null,["cause_key"]=i%2==0?"PINHOLE_MIN_SIZE":null,["defect_size"]=i%2==0?2.35+i/10.0:null,["defect_extra"]=0.52,["image_size"]=16384,["image_width"]=128,["image_height"]=128,["image_channels"]=1,["has_image"]=true,
-        ["raw_x"]=10.25+i,["raw_y"]=20.5+i,["cad_x"]=80+i,["cad_y"]=160+i,["d_attr"]=new double[]{2.4,0.5,13.0},["source_metadata_version"]=1,["source_block_idx"]=1,["source_axis_x"]=i%8+1,["source_axis_y"]=i%12+1
-    }};
-    public Task<ResultRow> DetailAsync(ConnectionProfile p,RowKey key,CancellationToken ct)
-    {
-        var row=Row(key.Database,int.TryParse(key.Id,out var n)?n:1);
-        if(key.Table=="inspection") row.Values["fov_count"]=12;
-        return Task.FromResult(row);
-    }
-    public Task<ImagePayload?> ImageAsync(ConnectionProfile p,RowKey key,CancellationToken ct)
-    {
-        byte[] bytes=new byte[128*128];
-        for(int y=0;y<128;y++) for(int x=0;x<128;x++)
-        { double dx=x-67,dy=y-63; bytes[y*128+x]=(byte)(Math.Abs(dx)<6&&Math.Abs(dy)<14?36:((x/16+y/16)%2==0?177:200)); }
-        return Task.FromResult<ImagePayload?>(new(bytes,128,128,1,key.Database,key.Id));
-    }
-    public Task<ModelGeometry> GeometryAsync(ConnectionProfile p,string model,CancellationToken ct)=>Task.FromResult(new ModelGeometry(2.2,0,0,256,384,new double[]{0},new double[]{0},256,384,Enumerable.Range(0,8).Select(x=>(double)x*32).ToArray(),Enumerable.Range(0,12).Select(x=>(double)x*32).ToArray(),32,32,256,384));
-    public Task StreamInspectionAsync(ConnectionProfile p,string database,string inspectionId,Func<long,IAsyncEnumerable<ResultRow>,CancellationToken,Task> consume,CancellationToken ct)
-    {var rows=Enumerable.Range(1,12).Select(i=>Row(database,i)).ToArray();return consume(rows.Length,Aoi.NasExplorer.Export.ExportService.Enumerate(rows),ct);}
-}

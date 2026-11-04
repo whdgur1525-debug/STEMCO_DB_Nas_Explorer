@@ -85,7 +85,7 @@ public sealed class ResultRow
         IFormattable f => f.ToString(null, CultureInfo.InvariantCulture) ?? "",
         _ => value.ToString() ?? ""
     };
-    public RowKey Key(string server, BrowseLevel level) => new(server, Database,
+    public RowKey Key(string server, BrowseLevel level) => level==BrowseLevel.Models?new(server,Database,"model",Text("model_name")):new(server, Database,
         level switch { BrowseLevel.Models or BrowseLevel.Lots => "lot_id", BrowseLevel.Layers => "layer", BrowseLevel.Inspections => "inspection", _ => "defects" },
         Text(level switch { BrowseLevel.Models or BrowseLevel.Lots => "lot_id", BrowseLevel.Layers => "layer", BrowseLevel.Inspections => "inspection", _ => "defects" }));
 }
@@ -126,7 +126,7 @@ public interface IExplorerRepository
         int pageSize, string? cursor, CancellationToken ct);
     Task<ResultRow> DetailAsync(ConnectionProfile profile, RowKey key, CancellationToken ct);
     Task<ImagePayload?> ImageAsync(ConnectionProfile profile, RowKey key, CancellationToken ct);
-    Task<ModelGeometry> GeometryAsync(ConnectionProfile profile, string model, CancellationToken ct);
+    Task<ModelGeometry> GeometryAsync(ConnectionProfile profile, string model,string layer,CancellationToken ct);
     Task StreamInspectionAsync(ConnectionProfile profile,string database,string inspectionId,
         Func<long,IAsyncEnumerable<ResultRow>,CancellationToken,Task> consume,CancellationToken ct);
 }

@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Text.Json;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -53,10 +53,10 @@ public partial class MainWindow
         await Check("ERT without actual model data is disabled with a reason",async()=>
         {
             Results.SelectedIndex=0;var start=DateTime.UtcNow;
-            while(!_ertAvailability.ContainsKey(Selected()!.Text("model_name"))){if((DateTime.UtcNow-start).TotalSeconds>10)throw new TimeoutException("Model availability timeout");await Task.Delay(10);}
+            while(!_ertAvailability.ContainsKey(Selected()!.Text("model_name")+"_Layer"+Selected()!.Text("layer_name"))){if((DateTime.UtcNow-start).TotalSeconds>10)throw new TimeoutException("Model availability timeout");await Task.Delay(10);}
             if(ErtButton.IsEnabled||!Convert.ToString(ErtButton.ToolTip)!.Contains("모델 자료"))throw new InvalidDataException("ERT eligibility was not explained");
         });
-        await Check("actual defect metadata and stored fields displayed",async()=>{await BeginQueryAsync(new(){Images=ImageFilter.Present},BrowseLevel.Defects,new[]{database},default);if(_rows.Count==0)throw new InvalidDataException("No defect images");Results.SelectedIndex=0;var start=DateTime.UtcNow;while(Details.Items.Count==0){if((DateTime.UtcNow-start).TotalSeconds>10)throw new TimeoutException("Detail load timeout");await Task.Delay(10);}});
+        await Check("actual defect metadata and stored fields displayed",async()=>{await BeginQueryAsync(new(){Images=ImageFilter.Present},BrowseLevel.Defects,new[]{database},default);if(_rows.Count==0||!SummaryLabel.Text.Contains("257,902"))throw new InvalidDataException("Defect-filtered count failed: "+SummaryLabel.Text);Results.SelectedIndex=0;var start=DateTime.UtcNow;while(Details.Items.Count==0){if((DateTime.UtcNow-start).TotalSeconds>10)throw new TimeoutException("Detail load timeout");await Task.Delay(10);}});
         await Check("actual image pixels decoded without HALCON",async()=>{var start=DateTime.UtcNow;while(DefectImage.Source is null){if((DateTime.UtcNow-start).TotalSeconds>10)throw new InvalidDataException(ImagePlaceholder.Text);await Task.Delay(10);}});
         await Check("actual selected-image workflow preserves bytes and reports snapshot success",async()=>
         {
@@ -66,6 +66,20 @@ public partial class MainWindow
             if(json.RootElement.GetProperty("saved").GetInt32()!=1||json.RootElement.GetProperty("snapshots").GetArrayLength()!=1)throw new InvalidDataException("Missing success report");
             string path=Directory.GetFiles(output,"*.raw",SearchOption.AllDirectories).Single();var expected=ImageBytes.Normalize(image.Bytes,image.Width,image.Height,image.Channels);
             if(!(await File.ReadAllBytesAsync(path)).SequenceEqual(expected))throw new InvalidDataException("Byte mismatch");
+        });
+        await Check("actual Handler-named image and whole-panel count bundle",async()=>
+        {
+            var selected=Selected()??throw new InvalidDataException("No selected defect");var image=_image??throw new InvalidDataException("No image");
+            string saved=await SaveHandlerImageAsync(selected,image,Path.Combine(folder,"handler-named-image"),default);
+            if(Path.GetFileName(saved)!=selected.Text("source_file_name")+".png")throw new InvalidDataException("Original Vision image name changed");
+            var child=Child(selected,BrowseLevel.Inspections,_filter);
+            await BeginQueryAsync(child.Filter,BrowseLevel.Defects,new[]{database},default);Results.SelectedIndex=0;
+            var inspection=(await _repository.QueryAsync(_profile,database,BrowseLevel.Inspections,new(){InspectionId=_filter.InspectionId},1,null,default)).Rows.Single();
+            string root=Path.Combine(folder,"actual-panel-bundle");await RunAsync(ct=>RunBundleAsync(root,CreateBundleScopes(BundleMode.Panel,CurrentPanelId()),new(false,false,true,true),ct),true);
+            using var result=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(root,"내보내기결과.json")));
+            if(result.RootElement.GetProperty("panels").GetInt64()!=1||result.RootElement.GetProperty("defects").GetInt64()!=inspection.Long("stored_defect_count")||result.RootElement.GetProperty("failures").GetInt64()!=0)throw new InvalidDataException("Panel bundle count mismatch");
+            if(Results.Columns.Any(x=>x.SortMemberPath is "pc_no" or "model_name" or "lot_id_name" or "layer_name"))throw new InvalidDataException("Fixed scope columns were duplicated");
+            var start=DateTime.UtcNow;while(DefectImage.Source is null){if((DateTime.UtcNow-start).TotalSeconds>10)throw new TimeoutException("Panel image");await Task.Delay(10);}
         });
         await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.ApplicationIdle);UpdateLayout();
         var content=(System.Windows.FrameworkElement)Content;var capture=new RenderTargetBitmap((int)content.ActualWidth,(int)content.ActualHeight,96,96,PixelFormats.Pbgra32);capture.Render(content);var png=new PngBitmapEncoder();png.Frames.Add(BitmapFrame.Create(capture));using(var stream=File.Create(Path.Combine(folder,"회수DB_화면.png")))png.Save(stream);
@@ -80,7 +94,7 @@ public partial class MainWindow
         static void Assert(bool value){if(!value)throw new InvalidOperationException("assertion failed");}
         async Task Until(Func<bool> condition)
         {var start=DateTime.UtcNow;while(!condition()){if((DateTime.UtcNow-start).TotalSeconds>5)throw new TimeoutException("UI state did not settle");await Task.Delay(10);}}
-        await Check("demo LOTs and DB scope",async()=>{await ShowDemoAsync();Assert(_rows.Count==12&&_queryDatabases.Single()=="예제_DB");Assert(ConnectionLabel.Text.Contains("예제"));});
+        await Check("demo LOTs and DB scope",async()=>{await ShowDemoAsync();Assert(_rows.Count==15&&_queryDatabases.Single()=="예제_DB");Assert(ConnectionLabel.Text.Contains("예제"));});
         await Check("local start never connects a remote saved host",async()=>
         {
             var prior=_profile;_profile=prior with{Host="remote.invalid"};
@@ -89,19 +103,19 @@ public partial class MainWindow
         });
         await Check("folder search keeps the displayed model LOT and exact inspection",async()=>
         {
-            var context=new SearchFilter{Model="PI-DEMO-01",Lot="LOT-20261104-001",Layer="L1",LotId="1",LayerId="1",InspectionId="1"};
+            var context=new SearchFilter{Model="p2411-004d101",Lot="agsd",Layer="L1",LotId="1",LayerId="1",InspectionId="1"};
             await BeginQueryAsync(context,BrowseLevel.Defects,new[]{"예제_DB"},default);SearchText.Text="PIN";
             var query=ReadFilter();Assert(query.Model==context.Model&&query.Lot==context.Lot&&query.Layer==context.Layer&&query.InspectionId=="1");
             Assert(ScopeBox.SelectedItem is Scope{Database:"예제_DB"});
         });
         await Check("changing model removes incompatible physical row IDs",async()=>
         {
-            await BeginQueryAsync(new(){Model="PI-DEMO-01",Lot="LOT-20261104-001",Layer="L1",LotId="1",LayerId="1",InspectionId="1"},BrowseLevel.Defects,new[]{"예제_DB"},default);
+            await BeginQueryAsync(new(){Model="p2411-004d101",Lot="agsd",Layer="L1",LotId="1",LayerId="1",InspectionId="1"},BrowseLevel.Defects,new[]{"예제_DB"},default);
             ModelText.Text="another model";var query=ReadFilter();Assert(query.LotId.Length==0&&query.LayerId.Length==0&&query.InspectionId.Length==0);
         });
         await Check("clear conditions clears hidden folder identifiers",async()=>
         {
-            await BeginQueryAsync(new(){Model="PI-DEMO-01",LotId="1",LayerId="1",InspectionId="1"},BrowseLevel.Defects,new[]{"예제_DB"},default);
+            await BeginQueryAsync(new(){Model="p2411-004d101",LotId="1",LayerId="1",InspectionId="1"},BrowseLevel.Defects,new[]{"예제_DB"},default);
             Clear_Click(new Button(),new System.Windows.RoutedEventArgs());var query=ReadFilter();Assert(query.Model.Length==0&&query.LotId.Length==0&&query.LayerId.Length==0&&query.InspectionId.Length==0);Assert(_filter.InspectionId=="1");
         });
         await Check("model to LOT to layer to inspection to defects",async()=>
@@ -111,7 +125,7 @@ public partial class MainWindow
             {Assert(_level==level);var next=Child(_rows[0],level,_filter);await BeginQueryAsync(next.Filter,next.Level,new[]{"예제_DB"},default);}
             Assert(_level==BrowseLevel.Defects&&_rows.Count>0);
         });
-        await Check("main columns prioritize model and panel",()=>{Assert(Results.Columns[0].SortMemberPath=="model_name");Assert(Results.Columns[3].SortMemberPath=="panel_no");return Task.CompletedTask;});
+        await Check("main columns prioritize model and panel",()=>{Assert(Results.Columns[0] is DataGridTemplateColumn);Assert(!Results.Columns.Any(x=>x.SortMemberPath=="pc_no"));Assert(!Results.Columns.Any(x=>x.SortMemberPath=="model_name"||x.SortMemberPath=="lot_id_name"||x.SortMemberPath=="layer_name"));return Task.CompletedTask;});
         await Check("automatic widths are not persisted before layout completes",async()=>
         {
             _view.ColumnWidths.Clear();await BeginQueryAsync(new(),BrowseLevel.Defects,new[]{"예제_DB"},default);
@@ -144,24 +158,24 @@ public partial class MainWindow
         {var row=new ResultRow{Values=new(){["inspection"]=17}};var child=Child(row,BrowseLevel.Inspections,new(){LatestOnly=true});Assert(child.Filter.InspectionId=="17"&&!child.Filter.LatestOnly);return Task.CompletedTask;});
         await Check("CSV formula and original JSON differ intentionally",()=>{Assert(ExportService.CsvCell("=cmd").Contains("'=cmd"));Assert(ExportService.Json(new(){Values=new(){["text"]="=cmd"}}).Contains("=cmd"));return Task.CompletedTask;});
         await Check("tree lazy loads first model level",async()=>
-        {ConfigureNavigation();var item=(TreeViewItem)Navigation.Items[0];item.Items.Clear();var node=(Nav)item.Tag;await PopulateNodeAsync(item,node,null,default);Assert(item.Items.Count==3);});
+        {ConfigureNavigation();var item=(TreeViewItem)Navigation.Items[0];item.Items.Clear();var node=(Nav)item.Tag;await PopulateNodeAsync(item,node,null,default);Assert(item.Items.Count==2);});
         await Check("LOT search starts outside previous exact inspection context",async()=>
         {
-            await BeginQueryAsync(new(){Model="PI-DEMO-01",Lot="LOT-20261104-001",Layer="L1",LotId="1",LayerId="1",InspectionId="1"},BrowseLevel.Defects,new[]{"예제_DB"},default);
-            SearchText.Text="LOT-20261104-002";SearchTargetBox.SelectedIndex=0;
+            await BeginQueryAsync(new(){Model="p2411-004d101",Lot="agsd",Layer="L1",LotId="1",LayerId="1",InspectionId="1"},BrowseLevel.Defects,new[]{"예제_DB"},default);
+            SearchText.Text="DB_TEST_260511";SearchTargetBox.SelectedIndex=0;
             await SearchGlobalAsync();Assert(_level==BrowseLevel.Lots&&_rows.Count==1);Assert(_filter.Target==SearchTarget.Lot&&_filter.InspectionId==""&&_filter.Model==""&&_filter.LotId=="");
         });
         await Check("back and forward restore filters and path without adding refresh history",async()=>
         {
-            await ShowDemoAsync();await BeginQueryAsync(new(){Text="LOT-20261104-001",Target=SearchTarget.Lot},BrowseLevel.Lots,new[]{"예제_DB"},default);
+            await ShowDemoAsync();await BeginQueryAsync(new(){Text="agsd",Target=SearchTarget.Lot},BrowseLevel.Lots,new[]{"예제_DB"},default);
             var child=Child(_rows[0],_level,_filter);await BeginQueryAsync(child.Filter,child.Level,new[]{"예제_DB"},default);
-            Assert(_trail.Count==2);await NavigateHistoryAsync(false);Assert(_level==BrowseLevel.Lots&&_filter.Text=="LOT-20261104-001"&&ForwardButton.IsEnabled);
+            Assert(_trail.Count==2);await NavigateHistoryAsync(false);Assert(_level==BrowseLevel.Lots&&_filter.Text=="agsd"&&ForwardButton.IsEnabled);
             await NavigateHistoryAsync(true);Assert(_level==BrowseLevel.Layers&&_filter.LotId=="1"&&_trail.Count==2);
             int history=_history.Count;await RefreshCurrentAsync();Assert(_history.Count==history&&_level==BrowseLevel.Layers);
         });
         await Check("direct defect shortcut bypasses intermediate folders and retains selected LOT",async()=>
         {
-            await ShowDemoAsync();Results.SelectedIndex=0;await OpenSelectedAsync(BrowseLevel.Defects);
+            await ShowDemoAsync();Results.SelectedIndex=_rows.FindIndex(x=>x.Text("lot_id_name")=="agsd");await OpenSelectedAsync(BrowseLevel.Defects);
             Assert(_level==BrowseLevel.Defects&&_filter.LotId=="1"&&_filter.InspectionId=="");
             Assert(SummaryLabel.Text.Contains("72")&&_summaryRows.Count==6);
         });
@@ -207,6 +221,48 @@ public partial class MainWindow
             try{await ExportErtCoreAsync(cancelled,SelectedRows(),cts.Token);throw new Exception("Expected cancel");}catch(OperationCanceledException){}
             using var cancellation=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(cancelled,"결과.json")));Assert(cancellation.RootElement.GetProperty("status").GetString()=="cancelled");
         });
+        await Check("checkbox selection, visible select-all and clearing are explicit",async()=>
+        {
+            await ShowDemoAsync();SetVisibleChecks(true);Assert(_checkedRecords.Count==15&&CheckedLabel.Text.Contains("15"));
+            ClearChecked_Click(new Button(),new System.Windows.RoutedEventArgs());Assert(_checkedRecords.Count==0);
+            _table.Rows[0]["__checked"]=true;Assert(_checkedRecords.Count==1&&BundleButton.IsEnabled);
+            var scopes=CreateBundleScopes(BundleMode.Checked,null);Assert(scopes.Count==1&&scopes[0].Filter.LotId==_rows[0].Text("lot_id"));
+        });
+        await Check("full Layer profile and resolution remain distinct in context",async()=>
+        {
+            foreach(string layer in new[]{"L1-SHORT1.0-0150","L1-T-SHORT2.0-0200","L2-B-SHORT3.5-0250"})
+            {var row=new ResultRow{Values=new(){["layer_name"]=layer}};EnrichLayer(row);Assert(row.Text("layer_resolution_code")==layer[^4..]&&row.Text("layer_recipe").Length>0);}
+            await BeginQueryAsync(new(){Model="p2411-004d101",Lot="agsd",Layer="L1-T-SHORT3.1-0200",LotId="1",LayerId="1",InspectionId="1",Panel=1},BrowseLevel.Defects,new[]{"예제_DB"},default);
+            Assert(PathPanel.Children.OfType<Button>().Any(x=>Convert.ToString(x.Content)!.Contains("Layer (L1-T-SHORT3.1-0200)")));
+            Assert(!Results.Columns.Any(x=>x.SortMemberPath is "model_name" or "lot_id_name" or "layer_name" or "pc_no"));
+        });
+        await Check("central bundle exports one whole panel with ERT original-name PNGs and counts",async()=>
+        {
+            Results.SelectedIndex=0;var scopes=CreateBundleScopes(BundleMode.Panel,CurrentPanelId());string root=Path.Combine(folder,"central-panel");
+            await RunAsync(ct=>RunBundleAsync(root,scopes,new(true,true,true,true),ct),true);
+            using var result=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(root,"내보내기결과.json")));
+            Assert(result.RootElement.GetProperty("panels").GetInt64()==1&&result.RootElement.GetProperty("defects").GetInt64()==12&&result.RootElement.GetProperty("images").GetInt64()==12&&result.RootElement.GetProperty("failures").GetInt64()==0);
+            string layer=Path.Combine(root,"EQ_09","p2411-004d101","agsd","L1-T-SHORT3.1-0200");Assert(File.Exists(Path.Combine(layer,"001.ERT")));
+            Assert(Directory.GetFiles(Path.Combine(layer,"1"),"agsd_1_L1-T-SHORT3.1-0200_*.png").Length==12);
+        });
+        await Check("central LOT bundle includes every panel and refresh protects checks",async()=>
+        {
+            await ShowDemoAsync();SearchText.Text="agsd";SearchTargetBox.SelectedIndex=0;await SearchGlobalAsync();SetVisibleChecks(true);
+            _view.RefreshSeconds=30;_lastRefreshAttempt=DateTimeOffset.Now.AddSeconds(-31);var previous=_lastRefresh;await AutoRefreshTickAsync(true);Assert(_lastRefresh==previous&&_checkedRecords.Count==1);_view.RefreshSeconds=0;
+            string root=Path.Combine(folder,"central-lot");await RunAsync(ct=>RunBundleAsync(root,CreateBundleScopes(BundleMode.Checked,null),new(true,false,true,false),ct),true);
+            using var result=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(root,"내보내기결과.json")));Assert(result.RootElement.GetProperty("panels").GetInt64()==6&&result.RootElement.GetProperty("defects").GetInt64()==72&&result.RootElement.GetProperty("ertFiles").GetInt64()==6);
+        });
+        await Check("new controls describe scope and export without favorite clutter",()=>
+        {
+            Assert(Navigation.Items.Cast<TreeViewItem>().All(x=>!Convert.ToString(x.Header)!.Contains("즐겨찾기")));
+            Assert(Convert.ToString(Results.Columns.Single(x=>x.SortMemberPath=="lot_id").Header)=="Index");
+            var dialog=new BundleWindow(1,BrowseLevel.Lots,null,"LOT 1개 · 패널 전체");Assert(dialog.Mode==BundleMode.Checked&&dialog.Options.Images&&dialog.Options.Counts);
+            var body=(System.Windows.FrameworkElement)dialog.Content;dialog.Content=null;body.Margin=new System.Windows.Thickness(0);
+            var frame=new Border{Child=body,Background=System.Windows.Media.Brushes.White,Padding=new System.Windows.Thickness(22)};frame.Measure(new System.Windows.Size(650,double.PositiveInfinity));frame.Arrange(new System.Windows.Rect(0,0,650,frame.DesiredSize.Height));frame.UpdateLayout();
+            var bitmap=new RenderTargetBitmap(650,(int)Math.Ceiling(frame.ActualHeight),96,96,PixelFormats.Pbgra32);bitmap.Render(frame);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));using(var stream=File.Create(Path.Combine(folder,"내보내기창.png")))encoder.Save(stream);dialog.Close();return Task.CompletedTask;
+        });
+        await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.ApplicationIdle);UpdateLayout();
+        var visual=(System.Windows.FrameworkElement)Content;var screen=new RenderTargetBitmap((int)visual.ActualWidth,(int)visual.ActualHeight,96,96,PixelFormats.Pbgra32);screen.Render(visual);var screenshot=new PngBitmapEncoder();screenshot.Frames.Add(BitmapFrame.Create(screen));using(var file=File.Create(Path.Combine(folder,"예제_새화면.png")))screenshot.Save(file);
         await File.WriteAllTextAsync(Path.Combine(folder,"ui-results.json"),JsonSerializer.Serialize(new{failed,checks},new JsonSerializerOptions{WriteIndented=true}));
         return failed;
     }

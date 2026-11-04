@@ -126,7 +126,7 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
         try
         {
         var s = await SchemaAsync(p, c, ct);
-        await using var cmd=BuildQuery(c,s,level,f,pageSize,cursor);
+        await using var cmd=BuildQuery(c,s,level,f,pageSize,cursor,true);
         var rows = new List<ResultRow>();
         await using(var r=await cmd.ExecuteReaderAsync(ct)) while(await r.ReadAsync(ct)) rows.Add(ReadRow(r,database));
         bool more = rows.Count > pageSize;
@@ -136,7 +136,7 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
         }
         finally{if(_snapshot is null)await c.DisposeAsync();}
     }
-    private static NpgsqlCommand BuildQuery(NpgsqlConnection c,IReadOnlyDictionary<string,string> s,BrowseLevel level,SearchFilter f,int? pageSize=null,string? cursor=null)
+    private static NpgsqlCommand BuildQuery(NpgsqlConnection c,IReadOnlyDictionary<string,string> s,BrowseLevel level,SearchFilter f,int? pageSize=null,string? cursor=null,bool panelCounts=false)
     {
         f.Validate();
         Require(s, "lot_id.lot_id");
@@ -184,7 +184,7 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
         {
             BrowseLevel.Models => "lo.model_name",
             BrowseLevel.Lots => "lo.lot_id,lo.model_name,lo.lot_id_name,lo.time AS lot_time,lo.status AS lot_status",
-            BrowseLevel.Layers => "l.layer,lo.model_name,lo.lot_id_name,l.layer_name,l.vms_status," + Field("layer","l","retest_count"),
+            BrowseLevel.Layers => "l.layer,lo.lot_id,lo.model_name,lo.lot_id_name,l.layer_name,l.vms_status," + Field("layer","l","retest_count"),
             BrowseLevel.Inspections => "i.inspection,lo.lot_id,l.layer AS layer_id,lo.model_name,lo.lot_id_name,l.layer_name,i.machine_id,i.pc_no,i.panel_no,i.time AS inspection_time,i.status AS inspection_status," + Field("inspection","i","handler_tact_sec")+","+Field("inspection","i","tact_ms"),
             _ => "d.defects,i.inspection,lo.lot_id,l.layer AS layer_id,lo.model_name,lo.lot_id_name,l.layer_name,i.machine_id,i.pc_no,i.panel_no,i.time AS inspection_time,i.status AS inspection_status,"+
                 string.Join(",",DefectFields.Select(x=>Field("defects","d",x)))+",(octet_length(d.image)>0) AS has_image,@missingFields AS missing_fields"
@@ -195,6 +195,8 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
         if(cursor is not null) Param($"{key}{(level==BrowseLevel.Models?">":"<")}@cursor", "cursor", level==BrowseLevel.Models ? cursor : NativeId(cursor,s[table+"."+keyName]));
         cmd.CommandText = $"SELECT {(level==BrowseLevel.Defects?"":"DISTINCT ")}{columns} FROM {from} WHERE {(conditions.Count==0 ? "TRUE" : string.Join(" AND ",conditions))}";
         if(pageSize.HasValue)cmd.CommandText+=$" ORDER BY {key}{(level==BrowseLevel.Models?"":" DESC")} LIMIT @limit";
+        // Count once per distinct, limited inspection; a defect-filter JOIN may contain hundreds of thousands of duplicate parent rows.
+        if(panelCounts&&level==BrowseLevel.Inspections)cmd.CommandText="SELECT panel_page.*,(SELECT count(*) FROM public.defects panel_defects WHERE panel_defects.inspection=panel_page.inspection) AS stored_defect_count FROM ("+cmd.CommandText+") panel_page ORDER BY panel_page.inspection DESC";
         // DISTINCT requires its ORDER BY expression to be selected. Only model names use explicit collation.
         if (level==BrowseLevel.Models) cmd.CommandText=cmd.CommandText.Replace("SELECT DISTINCT lo.model_name FROM", "SELECT DISTINCT lo.model_name COLLATE \"C\" AS model_name FROM");
         if(pageSize.HasValue)cmd.Parameters.AddWithValue("limit", pageSize.Value+1);
@@ -243,14 +245,15 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
         return new(bytes,r.IsDBNull(1)?0:Convert.ToInt32(r[1]),r.IsDBNull(2)?0:Convert.ToInt32(r[2]),r.IsDBNull(3)?1:Convert.ToInt32(r[3]),key.Database,key.Id);
         }finally{if(_snapshot is null)await c.DisposeAsync();}
     }
-    public async Task<ModelGeometry> GeometryAsync(ConnectionProfile p,string model,CancellationToken ct)
+    public async Task<ModelGeometry> GeometryAsync(ConnectionProfile p,string model,string layer,CancellationToken ct)
     {
         await using var c=await OpenAsync(p,p.ModelDatabase,ct);
         await using var modelTransaction=await c.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead,ct);
         await using var cmd=new NpgsqlCommand("SELECT model_id FROM public.aoi_model WHERE model_name=@model",c);
-        cmd.Parameters.AddWithValue("model",model);
+        string fullName=model+"_Layer"+layer;
+        cmd.Parameters.AddWithValue("model",fullName);
         object? id=await cmd.ExecuteScalarAsync(ct);
-        if(id is null) throw new KeyNotFoundException("모델 DB에 해당 모델이 없습니다. 원본 필드 조회·CSV·이미지 저장은 계속 사용할 수 있습니다.");
+        if(id is null) throw new KeyNotFoundException("모델 DB에 해당 Model/Layer가 없습니다: "+fullName+". CSV·이미지 저장은 계속 사용할 수 있습니다.");
         async Task<ResultRow> One(string table,string fields)
         {
             await using var q=new NpgsqlCommand($"SELECT {fields} FROM public.{table} WHERE model_id=@id",c); q.Parameters.AddWithValue("id",id);

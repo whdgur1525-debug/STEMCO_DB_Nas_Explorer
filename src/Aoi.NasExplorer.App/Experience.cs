@@ -16,7 +16,7 @@ namespace Aoi.NasExplorer.App;
 
 public partial class MainWindow
 {
-    private sealed record Location(SearchFilter Filter,BrowseLevel Level,string[] Databases);
+    private sealed record Location(SearchFilter Filter,BrowseLevel Level,string[] Databases,bool AllDatabases=false);
     private sealed record NavigationState(Location Current,Location[] Trail);
     private readonly Stack<NavigationState> _forward=new();
     private readonly List<Location> _trail=[];
@@ -30,6 +30,7 @@ public partial class MainWindow
     private string? _lastOutput;
     private bool _experienceReady;
     private bool _detailLoading;
+    private bool _allDatabases;
 
     private void InitializeExperience()
     {
@@ -57,8 +58,8 @@ public partial class MainWindow
         var filter=ReadFilter();bool fromPanelGroup=filter.MachineExact;
         return filter with{Model="",Lot="",Layer="",LotId="",LayerId="",InspectionId="",Machine=fromPanelGroup?"":filter.Machine,MachineExact=false,Panel=fromPanelGroup?null:filter.Panel};
     }
-    private async Task SearchGlobalAsync()=>await RunAsync(ct=>BeginQueryAsync(CreateSearchFilter(),SelectedTarget()==SearchTarget.Model?BrowseLevel.Models:BrowseLevel.Lots,SelectedDatabases(),ct));
-    private async void Filter_Click(object sender,RoutedEventArgs e)=>await RunAsync(ct=>BeginQueryAsync(ReadFilter(),_level,SelectedDatabases(),ct));
+    private async Task SearchGlobalAsync()=>await RunAsync(ct=>BeginQueryAsync(CreateSearchFilter(),SelectedTarget()==SearchTarget.Model?BrowseLevel.Models:BrowseLevel.Lots,SelectedDatabases(),ct,allDatabases:ScopeBox.SelectedItem is Scope{Database:null}));
+    private async void Filter_Click(object sender,RoutedEventArgs e)=>await RunAsync(ct=>BeginQueryAsync(ReadFilter(),_level,SelectedDatabases(),ct,allDatabases:ScopeBox.SelectedItem is Scope{Database:null}));
     private async Task OpenSelectedAsync(BrowseLevel target)
     {
         if(_queryCts is not null||Selected() is not ResultRow row)return;
@@ -67,31 +68,15 @@ public partial class MainWindow
     }
     private async void OpenInspections_Click(object sender,RoutedEventArgs e)=>await OpenSelectedAsync(BrowseLevel.Inspections);
     private async void OpenDefects_Click(object sender,RoutedEventArgs e)=>await OpenSelectedAsync(BrowseLevel.Defects);
-    private NavigationState CaptureNavigation()=>new(new(_filter,_level,_queryDatabases.ToArray()),_trail.ToArray());
+    private NavigationState CaptureNavigation()=>new(new(_filter,_level,_queryDatabases.ToArray(),_allDatabases),_trail.ToArray());
     private void ResetExperience(){_history.Clear();_forward.Clear();_trail.Clear();_ertAvailability.Clear();_summaryRows.Clear();}
-    private void UpdatePath(SearchFilter filter,BrowseLevel level,string[] databases,Location[]? trail)
+    private void UpdatePath(SearchFilter filter,BrowseLevel level,string[] databases,Location[]? trail,bool allDatabases)
     {
-        var next=new Location(filter,level,databases);
+        var next=new Location(filter,level,databases,allDatabases);
         if(trail is not null){_trail.Clear();_trail.AddRange(trail);}
         else if(_trail.Count>0&&level>_level&&databases.All(x=>_queryDatabases.Contains(x))&&filter.Text==_filter.Text&&filter.Target==_filter.Target&&(filter.Model.Length>0||filter.LotId.Length>0||filter.LayerId.Length>0||filter.InspectionId.Length>0))
             _trail.Add(next);
         else{_trail.Clear();_trail.Add(next);}
-        PathPanel.Children.Clear();
-        for(int n=0;n<_trail.Count;n++)
-        {
-            int index=n;var item=_trail[n];
-            string context=string.Join(" / ",new[]{item.Filter.Model,item.Filter.Lot,item.Filter.Layer}.Where(x=>x.Length>0));
-            string label=n==0?item.Filter.Text.Length>0?$"검색: {item.Filter.Text}":context.Length>0?context:LevelNames[(int)item.Level]:item.Level switch{BrowseLevel.Lots=>item.Filter.Model,BrowseLevel.Layers=>item.Filter.Lot,BrowseLevel.Inspections=>item.Filter.Layer.Length>0?item.Filter.Layer:"검사 이력",BrowseLevel.Defects=>item.Filter.InspectionId.Length>0?"검사 "+item.Filter.InspectionId:item.Filter.Lot+" · 불량",_=>LevelNames[(int)item.Level]};
-            if(n>0)PathPanel.Children.Add(new TextBlock{Text="›",VerticalAlignment=VerticalAlignment.Center});
-            var button=new Button{Content=label,ToolTip="이 검색 범위로 돌아가기",FontWeight=n==_trail.Count-1?FontWeights.SemiBold:FontWeights.Normal};
-            button.Click+=async(_,_)=>
-            {
-                if(_queryCts is not null)return;
-                var path=_trail.Take(index+1).ToArray();
-                await RunAsync(ct=>BeginQueryAsync(item.Filter,item.Level,item.Databases,ct,true,path));
-            };
-            PathPanel.Children.Add(button);
-        }
     }
     private async Task NavigateHistoryAsync(bool forward)
     {
@@ -99,18 +84,27 @@ public partial class MainWindow
         var from=forward?_forward:_history;var to=forward?_history:_forward;
         if(!from.TryPop(out var state))return;
         to.Push(CaptureNavigation());
-        await RunAsync(ct=>BeginQueryAsync(state.Current.Filter,state.Current.Level,state.Current.Databases,ct,false,state.Trail));
+        await RunAsync(ct=>BeginQueryAsync(state.Current.Filter,state.Current.Level,state.Current.Databases,ct,false,state.Trail,state.Current.AllDatabases));
     }
     private async void Forward_Click(object sender,RoutedEventArgs e)=>await NavigateHistoryAsync(true);
     private async void Refresh_Click(object sender,RoutedEventArgs e)=>await RefreshCurrentAsync();
-    private async Task RefreshCurrentAsync()
+    private async Task RefreshCurrentAsync(bool rediscover=true)
     {
         if(_queryCts is not null||_queryDatabases.Count==0)return;
         var selection=Selected()?.Key(_profile.Identity,_level);var state=CaptureNavigation();
         ClearImages();_ertAvailability.Clear();
         await RunAsync(async ct=>
         {
-            await BeginQueryAsync(state.Current.Filter,state.Current.Level,state.Current.Databases,ct,false,state.Trail);
+            var databases=state.Current.Databases;
+            if(rediscover)
+            {
+                bool all=state.Current.AllDatabases;
+                if(_repository is ExplorerRepository repo)repo.ClearSchemaCache();
+                _databases=(await _repository.DiscoverAsync(_profile,ct)).ToList();ConfigureNavigation();
+                var found=_databases.Where(x=>x.IsInspection).Select(x=>x.Name).ToArray();
+                databases=all?found:databases.Where(found.Contains).ToArray();
+            }
+            await BeginQueryAsync(state.Current.Filter,state.Current.Level,databases,ct,false,state.Trail,state.Current.AllDatabases);
             if(selection is not null)
             {
                 int index=_rows.FindIndex(x=>x.Key(_profile.Identity,_level)==selection);
@@ -130,9 +124,9 @@ public partial class MainWindow
         UpdateRefreshLabel();
         if(_view.RefreshSeconds<=0||_queryCts is not null||!(activeOverride??IsActive)||_lastRefreshAttempt is null||_queryDatabases.Count==0)return;
         // Do not overwrite an in-progress edit in search/filters or cancel a selected image load.
-        if(Keyboard.FocusedElement is TextBox||_detailLoading)return;
+        if(Keyboard.FocusedElement is TextBox||_detailLoading||_checkedRecords.Count>0)return;
         try{if(ReadFilter()!=_filter||!SelectedDatabases().SequenceEqual(_queryDatabases))return;}catch(ArgumentException){return;}
-        if((DateTimeOffset.Now-_lastRefreshAttempt.Value).TotalSeconds>=_view.RefreshSeconds)await RefreshCurrentAsync();
+        if((DateTimeOffset.Now-_lastRefreshAttempt.Value).TotalSeconds>=_view.RefreshSeconds)await RefreshCurrentAsync(false);
     }
     private void UpdateRefreshLabel()
     {
@@ -180,7 +174,7 @@ public partial class MainWindow
         }
         SummaryLabel.Text=$"검색 일치 불량 {defects:N0}건 · LOT {lots:N0}개 · 검사 기록 {inspections:N0}개 · 패널 그룹 {panels:N0}개"+(failures.Count>0?$" · 일부 집계 실패 ({failures.Count} DB)":"");
         ActiveFilterLabel.Text=DescribeFilters();
-        Notice.Text="건수는 저장된 검출 기록 수입니다. 재검·PC별 기록 포함. ERT와 비교할 때 같은 검사 ID를 선택하세요. 열 정렬은 현재 표시분에 적용됩니다."+(_summaryRows.Count<panels?$" · 집계 표는 DB별 최대 1,000그룹 표시 (전체 {panels:N0}).":"");
+        Notice.Text=(_demo?"예제: 이름은 회수 자료 기준, 수량·좌표·이미지는 연습용입니다. ":"")+"건수는 검색 전체 · 재검 기록 포함 · 열 정렬은 현재 표시분 기준"+(_summaryRows.Count<panels?$" · 집계 표는 DB별 최대 1,000그룹 표시 (전체 {panels:N0}).":"");
         if(_failedDatabases.Count>0)Notice.Text+=" · 목록 조회 실패 DB 있음: 작업 기록 확인";
     }
     private async void PanelSummary_DoubleClick(object sender,MouseButtonEventArgs e)
@@ -193,22 +187,23 @@ public partial class MainWindow
     }
     private async Task CheckErtAvailabilityAsync(CancellationToken ct)
     {
-        foreach(var model in SelectedRows().Select(x=>x.Text("model_name")).Distinct())
+        foreach(var pair in SelectedRows().Select(x=>(Model:x.Text("model_name"),Layer:x.Text("layer_name"))).Distinct())
         {
-            if(_ertAvailability.ContainsKey(model))continue;
-            try{await _repository.GeometryAsync(_profile,model,ct);ct.ThrowIfCancellationRequested();_ertAvailability[model]=null;}
-            catch(Exception ex) when(ex is not OperationCanceledException){_ertAvailability[model]="모델 자료 확인 필요: "+ExplorerRepository.SafeError(ex);}
+            string key=pair.Model+"_Layer"+pair.Layer;
+            if(_ertAvailability.ContainsKey(key))continue;
+            try{await _repository.GeometryAsync(_profile,pair.Model,pair.Layer,ct);ct.ThrowIfCancellationRequested();_ertAvailability[key]=null;}
+            catch(Exception ex) when(ex is not OperationCanceledException){_ertAvailability[key]="모델 자료 확인 필요: "+ExplorerRepository.SafeError(ex);}
         }
     }
     private string DescribeFilters()
     {
         var f=_filter;var parts=new List<string>();
         void Add(string name,object? value){if(value is not null&&Convert.ToString(value)?.Length>0)parts.Add(name+": "+value);}
-        if(f.Text.Length>0)Add(f.Target switch{SearchTarget.Lot=>"LOT 포함",SearchTarget.Model=>"모델 포함",_=>"모델/LOT 포함"},f.Text);
-        Add("모델",f.Model);Add("LOT",f.Lot);Add("레이어",f.Layer);Add("검사 ID",f.InspectionId);Add("장비",f.Machine);Add("패널",f.Panel);Add("PC",f.Pc);
+        Add("장비",f.Machine);
         Add("시작일",f.From?.ToString("yyyy-MM-dd"));Add("종료일",f.UntilExclusive?.AddDays(-1).ToString("yyyy-MM-dd"));Add("AOI",f.DefectCode);Add("VMS 코드",f.VmsCode);Add("VMS 판정",f.VmsState);Add("AI",f.AiCode);Add("원인 코드",f.CauseCode);Add("원인",f.CauseText);Add("최소 크기",f.MinimumSize);Add("최대 크기",f.MaximumSize);
-        if(f.Images!=ImageFilter.All)parts.Add(f.Images==ImageFilter.Present?"이미지 있음":"이미지 없음");if(f.LatestOnly)parts.Add("DB·레이어·장비·패널·PC별 최신");
-        return parts.Count==0?"조건: 선택한 DB 전체 · 재검 이력 포함":"적용 조건 · "+string.Join(" / ",parts);
+        if(f.Images!=ImageFilter.All)parts.Add(f.Images==ImageFilter.Present?"이미지 있음":"이미지 없음");if(f.LatestOnly)parts.Add("패널별 최신 기록");
+        ActiveFilterLabel.Visibility=parts.Count==0?Visibility.Collapsed:Visibility.Visible;
+        return parts.Count==0?"":"검색조건 · "+string.Join(" / ",parts);
     }
     private void UpdateActions()
     {
@@ -225,14 +220,15 @@ public partial class MainWindow
         Enable(JsonButton,ready&&selected.Count==1,"목록에서 기록 하나를 선택하세요.");
         Enable(SelectedImagesButton,ready&&_level==BrowseLevel.Defects&&selected.Any(x=>x["has_image"] is true),"불량 목록에서 이미지가 있는 행을 선택하세요. Ctrl/Shift로 여러 개 선택할 수 있습니다.");
         Enable(AllImagesButton,ready&&_level==BrowseLevel.Defects&&_rows.Count>0,"불량 목록의 검색조건에 맞는 전체 이미지를 저장합니다.");
-        string? unavailable=selected.Select(x=>x.Text("model_name")).Select(x=>_ertAvailability.TryGetValue(x,out string? reason)?reason:"모델 자료 확인 중").FirstOrDefault(x=>x is not null);
+        string? unavailable=selected.Select(x=>x.Text("model_name")+"_Layer"+x.Text("layer_name")).Select(x=>_ertAvailability.TryGetValue(x,out string? reason)?reason:"모델 자료 확인 중").FirstOrDefault(x=>x is not null);
         bool ert=ready&&_level==BrowseLevel.Inspections&&selected.Count>0&&unavailable is null;
         Enable(ErtButton,ert,unavailable??"검사 이력에서 저장할 검사를 선택하세요. 검사 ID별 전체 불량으로 ERT를 재구성합니다.");
         Enable(ErtPreviewButton,ert&&selected.Count==1,unavailable??"검사 이력에서 검사 하나를 선택하세요.");
         Enable(SaveImageButton,!busy&&_image is {Bytes.Length:>0},"표시 중인 이미지 원본과 열람용 PNG를 저장합니다.");
         Enable(SummaryCsvButton,ready&&(_summaryRows.Count>0||_lotSummaryRows.Count>0),"선택한 탭의 집계 표를 저장합니다. 각 표는 DB별 최대 1,000개입니다.");
         Enable(OpenOutputButton,!busy&&_lastOutput is not null,"최근 내보내기 저장 폴더를 엽니다.");
-        RefreshButton.IsEnabled=ready;CancelButton.IsEnabled=busy;SearchButton.IsEnabled=!busy;DatabasesButton.IsEnabled=!busy;
+        RefreshButton.IsEnabled=ready;CancelButton.IsEnabled=busy;SearchButton.IsEnabled=!busy;DatabasesButton.IsEnabled=ready;MoreButton.IsEnabled=ready&&_hasMore;
+        BundleButton.IsEnabled=ready&&_rows.Count>0;CheckVisibleButton.IsEnabled=ready&&_rows.Count>0;ClearCheckedButton.IsEnabled=ready&&_checkedRecords.Count>0;
         Navigation.IsEnabled=Results.IsEnabled=PanelSummary.IsEnabled=LotSummary.IsEnabled=PathPanel.IsEnabled=!busy;
         foreach(var control in new Control[]{ScopeBox,SearchTargetBox,SearchText,AutoRefreshBox,ModelText,LotText,LayerText,MachineText,PanelText,PcText,DefectText,VmsText,AiText,CauseCodeText,CauseText,MinSizeText,MaxSizeText,FromDate,ToDate,StateBox,ImageFilterBox})control.IsEnabled=!busy;
         UpdateRefreshLabel();

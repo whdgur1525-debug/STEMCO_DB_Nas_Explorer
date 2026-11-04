@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Aoi.NasExplorer.Core;
@@ -117,7 +117,7 @@ VALUES (1,1,1,1,1,10,20,30,40,1,0,0,decode('00010203','hex'),2,2,1,NULL,NULL,NUL
         await Admin(p,"aoi_config","CREATE TABLE IF NOT EXISTS db_status(db_name text primary key,status text); TRUNCATE db_status; INSERT INTO db_status VALUES ('aoi_20990101','ARCHIVE'),('aoi_20990102','ACTIVE');");
         await Admin(p,"aoi_model","""
 DROP SCHEMA public CASCADE; CREATE SCHEMA public;
-CREATE TABLE aoi_model(model_id bigint,model_name text); INSERT INTO aoi_model VALUES(1,'MODEL_A');
+CREATE TABLE aoi_model(model_id bigint,model_name text); INSERT INTO aoi_model VALUES(1,'MODEL_A_LayerL1');
 CREATE TABLE aoi_block_pos(model_id bigint,image_resolution double precision,x double precision[],y double precision[],width double precision[],height double precision[]); INSERT INTO aoi_block_pos VALUES(1,2.2,ARRAY[0.]::float8[],ARRAY[0.]::float8[],ARRAY[100.]::float8[],ARRAY[100.]::float8[]);
 CREATE TABLE aoi_cellunits(model_id bigint,frame_pos double precision[],unit_pos double precision[]); INSERT INTO aoi_cellunits VALUES(1,ARRAY[10.,30.]::float8[],ARRAY[10.,30.]::float8[]);
 CREATE TABLE aoi_elem_unit(model_id bigint,x double precision[],width double precision[],height double precision[]); INSERT INTO aoi_elem_unit VALUES(1,ARRAY[0.]::float8[],ARRAY[10.]::float8[],ARRAY[10.]::float8[]);
@@ -194,8 +194,8 @@ CREATE TABLE aoi_punch(model_id bigint,punch_apply boolean,punch_units integer[]
         await Check("invalid table name rejected",async()=>{try{await repo.DetailAsync(p,new(p.Identity,db1,"defects;DROP","1"),default);throw new Exception("Expected ArgumentException");}catch(ArgumentException){}});
         await Check("read-only startup setting rejects INSERT",async()=>{await using var c=new NpgsqlConnection(ExplorerRepository.ConnectionString(p,db1));await c.OpenAsync();await using var cmd=new NpgsqlCommand("INSERT INTO lot_id(lot_id_name,model_name) VALUES('SHOULD_NOT_EXIST','x')",c);try{await cmd.ExecuteNonQueryAsync();throw new Exception("write unexpectedly allowed");}catch(PostgresException ex){Equal("25006",ex.SqlState);}});
         await Check("cancelled query does not succeed",async()=>{using var cts=new CancellationTokenSource();cts.Cancel();try{await repo.QueryAsync(p,db1,BrowseLevel.Defects,new(),10,null,cts.Token);throw new Exception("Expected cancellation");}catch(OperationCanceledException){}});
-        await Check("model geometry from separate model DB",async()=>Equal(4,(await repo.GeometryAsync(p,"MODEL_A",default)).TotalUnits));
-        await Check("ERT reconstruction preserves selected record only",async()=>{var rows=(await Q(BrowseLevel.Defects,new(){InspectionId="2"})).Rows;var ert=ErtExporter.Render("C:\\test","MODEL_A","LOT_A","L1",1,new(2026,11,3),"VMS_COMPLETED",1,await repo.GeometryAsync(p,"MODEL_A",default),rows);True(ert.Text.StartsWith("4.3.1, 1,"));True(ert.Text.Contains("11.000000, 21.000000"));});
+        await Check("model geometry from separate model DB",async()=>Equal(4,(await repo.GeometryAsync(p,"MODEL_A","L1",default)).TotalUnits));
+        await Check("ERT reconstruction preserves selected record only",async()=>{var rows=(await Q(BrowseLevel.Defects,new(){InspectionId="2"})).Rows;var ert=ErtExporter.Render("C:\\test","MODEL_A","LOT_A","L1",1,new(2026,11,3),"VMS_COMPLETED",1,await repo.GeometryAsync(p,"MODEL_A","L1",default),rows);True(ert.Text.StartsWith("4.3.1, 1,"));True(ert.Text.Contains("11.000000, 21.000000"));});
         await Check("all-result CSV streams across overlapping IDs",async()=>{async IAsyncEnumerable<ResultRow> All(){foreach(var db in new[]{db1,db2}){string? cur=null;do{var page=await Q(BrowseLevel.Defects,count:2,cursor:cur,db:db);foreach(var row in page.Rows)yield return row;cur=page.Cursor;}while(cur is not null);}}string path=Path.Combine(output,"integration-"+Guid.NewGuid().ToString("N")+".csv");Equal(10L,await ExportService.CsvAsync(path,All(),default));});
         // UUID schema is isolated and validates older pre-BIGSERIAL deployments without changing any real DB.
         try{await Admin(p,"postgres","CREATE DATABASE aoi_uuid");}catch(PostgresException ex)when(ex.SqlState=="42P04"){}
@@ -270,6 +270,87 @@ CREATE TABLE defects(defects uuid PRIMARY KEY,inspection uuid,unit_idx int,unit_
             for(int timeout=10;timeout<24;timeout++)Equal(2,(await repo.QueryAsync(p with{TimeoutSeconds=timeout},db1,BrowseLevel.Models,new(),10,null,default)).Rows.Count);
             Equal(2,(await repo.QueryAsync(p,db1,BrowseLevel.Models,new(),10,null,default)).Rows.Count);
         });
+        async Task<string> ImageFile(ResultRow row,ImagePayload image,string folder,CancellationToken ct)
+        {Directory.CreateDirectory(folder);string path=Path.Combine(folder,"defect_"+row.Text("defects")+".bin");await File.WriteAllBytesAsync(path,image.Bytes,ct);return path;}
+        string BundleRoot(string name)=>Path.Combine(output,"bundle-"+name+"-"+Guid.NewGuid().ToString("N"));
+        await Check("Handler-style bundle expands a LOT into full panels and preserves reinspection collisions",async()=>
+        {
+            string root=BundleRoot("lot");var result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){LotId="1"})},new(true,true,true,true),ImageFile,null,default);
+            Equal(4L,result.Panels);Equal(4L,result.Defects);Equal(4L,result.ErtFiles);Equal(2L,result.Images);Equal(2L,result.MissingImages);Equal(0L,result.Failures);
+            True(File.Exists(Path.Combine(root,"EQ09","MODEL_A","LOT_A","L1","001.ERT")));
+            Equal(4,Directory.GetFiles(root,"*.ERT",SearchOption.AllDirectories).Length);True(Directory.GetDirectories(root,"_검사이력",SearchOption.AllDirectories).Length>0);
+            True(!Directory.GetDirectories(root,"*PC*",SearchOption.AllDirectories).Any());
+            Equal(5,(await File.ReadAllLinesAsync(Path.Combine(root,"패널별불량수.csv"))).Length);
+        });
+        await Check("query export resolves matching LOTs before expanding complete panel contents",async()=>
+        {
+            string root=BundleRoot("search");var result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){Images=ImageFilter.Present},BrowseLevel.Lots,true)},new(false,false,true,false),ImageFile,null,default);
+            Equal(4L,result.Panels);Equal(4L,result.Defects);True(!Directory.Exists(Path.Combine(root,"EQ09","MODEL_B")));
+        });
+        await Check("one defect selection exports its whole panel and deduplicates checked defects",async()=>
+        {
+            var row=(await Q(BrowseLevel.Defects,new(){InspectionId="2"})).Rows.Single();
+            var f=InspectionBundleExporter.SelectionFilter(new(){CauseCode=4001,VmsState=1},BrowseLevel.Defects,row);
+            string root=BundleRoot("panel");var result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,f),new BundleScope(db1,f)},new(true,false,true,false),ImageFile,null,default);
+            Equal(1L,result.Panels);Equal(1L,result.Defects);Equal(1L,result.ErtFiles);
+        });
+        await Check("missing ERT model does not block images and defect-count output",async()=>
+        {
+            string root=BundleRoot("missing-model");var result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){InspectionId="5"})},new(true,true,true,false),ImageFile,null,default);
+            Equal("partial_failure",result.Status);Equal(1L,result.Panels);Equal(1L,result.Defects);Equal(1L,result.Failures);Equal(0L,result.ErtFiles);True(File.Exists(Path.Combine(root,"패널별불량수.csv")));
+        });
+        await Check("SEMCO folder ordering and original safe names stay readable",()=>
+        {
+            var row=new ResultRow{Values=new(){["machine_id"]="EQ_09",["model_name"]="p2411-004d101",["lot_id_name"]="agsd",["layer_name"]="L1-T-SHORT3.1-0200"}};
+            Equal(Path.Combine("root","EQ_09","p2411-004d101","L1-T-SHORT3.1-0200","agsd"),InspectionBundleExporter.LayerFolder("root",row,true));
+            Equal("p2411-004d101",InspectionBundleExporter.Component("p2411-004d101"));True(!InspectionBundleExporter.Component("../bad").Contains('/'));
+        });
+        await Check("bundle cancellation writes a cancelled receipt and releases the snapshot",async()=>
+        {
+            string root=BundleRoot("cancel");using var cts=new CancellationTokenSource();
+            try
+            {
+                await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){InspectionId="1"})},new(false,true,true,false),async(row,image,folder,ct)=>{cts.Cancel();await Task.Delay(1,ct);return "unreachable";},null,cts.Token);
+                throw new Exception("Expected cancellation");
+            }
+            catch(OperationCanceledException){}
+            using var receipt=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(root,"내보내기결과.json")));
+            Equal("cancelled",receipt.RootElement.GetProperty("status").GetString());Equal(5,(await Q(BrowseLevel.Defects)).Rows.Count);
+        });
+        await Check("bundle keeps all panels on one DB snapshot during concurrent inserts and image changes",async()=>
+        {
+            try
+            {
+                bool changed=false;string root=BundleRoot("live");
+                var result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){LotId="1"})},new(false,true,true,false),async(row,image,folder,ct)=>
+                {
+                    if(!changed){changed=true;await Admin(p,db1,"UPDATE defects SET image=decode('aabbccdd','hex') WHERE defects=1;INSERT INTO defects(defects,inspection,unit_idx) VALUES(999,1,999)");}
+                    if(row.Text("defects")=="1")Equal((byte)0,image.Bytes[0]);return await ImageFile(row,image,folder,ct);
+                },null,default);
+                Equal(4L,result.Defects);Equal(4L,result.Panels);Equal(2L,result.Images);Equal(6,(await Q(BrowseLevel.Defects)).Rows.Count);
+            }
+            finally{await Admin(p,db1,"DELETE FROM defects WHERE defects=999;UPDATE defects SET image=decode('00010203','hex') WHERE defects=1");}
+        });
+        await Check("zero-defect panel bundle still writes ERT and a zero count row",async()=>
+        {
+            try
+            {
+                await Admin(p,db1,"INSERT INTO inspection(inspection,layer,machine_id,pc_no,panel_no,time,status) VALUES(887,1,'EQ09',0,9,now(),'COMPLETED')");
+                string root=BundleRoot("zero");var result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){InspectionId="887"})},new(true,true,true,false),ImageFile,null,default);
+                Equal(1L,result.Panels);Equal(0L,result.Defects);Equal(1L,result.ErtFiles);Equal(0L,result.Failures);Equal(2,(await File.ReadAllLinesAsync(Path.Combine(root,"패널별불량수.csv"))).Length);
+            }
+            finally{await Admin(p,db1,"DELETE FROM inspection WHERE inspection=887");}
+        });
+        await Check("same face with different Layer recipes and resolutions does not mix",async()=>
+        {
+            try
+            {
+                await Admin(p,db1,"INSERT INTO layer(layer,layer_name,model_name,lot_id) VALUES(777,'L1-SHORT1.0-0150','MODEL_A',1),(778,'L1-T-SHORT3.1-0200','MODEL_A',1);INSERT INTO inspection(inspection,layer,machine_id,pc_no,panel_no,time,status) VALUES(777,777,'EQ09',0,1,now(),'COMPLETED'),(778,778,'EQ09',0,1,now(),'COMPLETED')");
+                Equal("777",(await Q(BrowseLevel.Inspections,new(){LotId="1",Layer="L1-SHORT1.0-0150"})).Rows.Single().Text("inspection"));
+                Equal("778",(await Q(BrowseLevel.Inspections,new(){LotId="1",Layer="L1-T-SHORT3.1-0200"})).Rows.Single().Text("inspection"));
+            }
+            finally{await Admin(p,db1,"DELETE FROM inspection WHERE inspection IN(777,778);DELETE FROM layer WHERE layer IN(777,778)");}
+        });
     }
     private static async Task StressAsync(string output)
     {
@@ -322,6 +403,13 @@ CREATE TABLE defects(defects uuid PRIMARY KEY,inspection uuid,unit_idx int,unit_
             {await using var cmd=new NpgsqlCommand("SELECT (SELECT count(*) FROM pg_subscription WHERE subdbid=(SELECT oid FROM pg_database WHERE datname=current_database()))+(SELECT count(*) FROM pg_publication)",c);Equal(0L,Convert.ToInt64(await cmd.ExecuteScalarAsync()));});
         }
         var metrics=new List<object>();
+        await Check("recovered defect-filtered inspection counts do not repeat per joined defect",async()=>
+        {
+            var clock=Stopwatch.StartNew();var page=await repo.QueryAsync(p,db,BrowseLevel.Inspections,new(){Images=ImageFilter.Present},1000,null,default);
+            Equal(78,page.Rows.Count);Equal(baseline["defects"],page.Rows.Sum(x=>x.Long("stored_defect_count")??0));
+            var summary=await repo.SummaryAsync(p,db,new(){Images=ImageFilter.Present},default);Equal(78L,summary.Inspections);Equal(baseline["defects"],summary.Defects);
+            metrics.Add(new{query="inspection_with_image_filter_and_counts",seconds=clock.Elapsed.TotalSeconds});
+        });
         await Check("recovered LOT and panel summary matches independent SQL totals",async()=>
         {
             var summary=await repo.SummaryAsync(p,db,new(),default);

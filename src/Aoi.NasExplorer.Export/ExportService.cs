@@ -73,7 +73,7 @@ public static class ErtExporter
     {
         if(new[]{model,lot,layer,folder}.Any(x=>x.IndexOfAny(new[]{',','\r','\n'})>=0)) throw new InvalidDataException("ERT 경로·이름에는 쉼표나 줄바꿈을 사용할 수 없습니다.");
         if(g.Resolution<=0 || !double.IsFinite(g.Resolution)) throw new InvalidDataException("모델 해상도가 올바르지 않습니다.");
-        var notes=new HashSet<string>(StringComparer.Ordinal){"모델 위치·해상도는 현재 모델 DB 기준입니다. 검사 당시 모델 스냅샷임을 보장하지 않습니다.","VMS 판정 변경시각이 DB에 별도 기록되지 않아 ERT의 리뷰 시각은 -1입니다."};
+        var notes=new HashSet<string>(StringComparer.Ordinal){"모델 위치·해상도는 현재 모델 DB 기준입니다. 검사 당시 모델 스냅샷임을 보장하지 않습니다.","헤더 유닛수·분할 축은 모델 기반 재구성입니다. Handler 원본 open_short_GM/검사 당시 축 분할 정보가 없어 NO_DB 원본 헤더와 같음을 보장하지 않습니다.","VMS 판정 변경시각이 DB에 별도 기록되지 않아 ERT의 리뷰 시각은 -1입니다."};
         int total=g.TotalUnits; int perFov=fovCount is >0 ? total/3/fovCount.Value : 0;
         if(fovCount is null or <=0) notes.Add("FOV 개수 미기록: ERT FOV당 유닛수는 호환 기본값 0입니다.");
         int reviewed=status is "VMS_COMPLETED" or "MES_COMPLETED"?1:0;
@@ -110,6 +110,7 @@ public static class ErtExporter
             bool punch=attrs is {Length:>=2}&&attrs[0]==9999&&attrs[1]==10&&Num("raw_x")==512&&Num("raw_y")==512;
             int code=(int)Num("vms_code"),state=(int)Num("vms_state");
             string mark=state==1?"B":state==2?"P":"V";
+            if(state==0&&d.Long("defect_type") is 19 or 20)mark="B";
             if(punch&&reviewed==0){mark="B";if(code==0)code=4;}
             // Match the current DataTransfer writer, retaining recorded sizes only when available.
             double area=punch?9999:d.Number("defect_size")??0;
