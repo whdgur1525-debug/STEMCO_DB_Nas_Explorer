@@ -1,4 +1,4 @@
-Synapse NAS Explorer 0.3.0 — 독립 검토 중인 후보
+Synapse NAS Explorer 0.3.0 — 로컬 독립 검증본
 
 C# WPF Windows x64 프로그램. VS2022에서 AOI-NasExplorer.sln을 열어 직접 수정할 수 있습니다.
 개발 호환: .NET9 / 런타임 포함 배포: .NET10. 빌드 스크립트는 PowerShell7 tools/Build.ps1.
@@ -74,10 +74,10 @@ NAS PostgreSQL 조회만 사용하며 Handler/Vision/장비동작/다모/MES/복
 - 기존 PostgreSQL 서비스/운영 NAS는 테스트 대상으로 임의 조작하지 않습니다.
 
 검증과 남은 업무
-- 이 문서는0.3 독립 검토 후보 기준입니다. 0.2 검증 결과를0.3 최종 통과로 세지 않습니다.
-- 별도 검토 채팅/독립 반례 하네스/10클라이언트 공존 부하 시험으로 검증 중입니다.
+- 이 문서는0.3 로컬 검증본 기준입니다. 0.2 검증 결과를0.3 통과로 세지 않습니다.
+- 별도 GUI 검토 채팅/독립 반례 하네스/10클라이언트 공존 부하 시험의 증거를 함께 보존합니다.
 - 실제 NAS/현장 CAM·VMS·Handler 동시 동작과 실제 원본 모델 ERT는 로컬 합성 시험과 별개입니다.
-- 장시간 방치/자동 갱신·접속 예산·짧은 스냅샷 등 공존 보완을 진행 중이며 후보별 기록에서 확인합니다.
+- 장시간 방치/자동 갱신·접속 예산·패널별 스냅샷·연속 이미지 조회의 검증 범위는 별도 보고서에 기록합니다.
 
 직접 수정하기
 - 원본: C:\Users\msi\source\repos\synapse_imaging\AOI-NasExplorer\AOI-NasExplorer.sln
