@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Aoi.NasExplorer.Core;
 
@@ -63,6 +64,7 @@ public sealed record DatabaseInfo(string Name, string State, bool IsInspection, 
 public sealed record RowKey(string Server, string Database, string Table, string Id);
 public sealed class ResultRow
 {
+    private static readonly JsonSerializerOptions ArrayJsonOptions=new(){NumberHandling=JsonNumberHandling.AllowNamedFloatingPointLiterals};
     public string Database { get; init; } = "";
     public Dictionary<string, object?> Values { get; init; } = new(StringComparer.Ordinal);
     public object? this[string name] => Values.GetValueOrDefault(name);
@@ -75,7 +77,7 @@ public sealed class ResultRow
         DateTime dt => dt.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture),
         DateTimeOffset dto => dto.ToString("O", CultureInfo.InvariantCulture),
         byte[] b => $"[{b.Length:N0} bytes]",
-        Array a => JsonSerializer.Serialize(a),
+        Array a => JsonSerializer.Serialize(a,ArrayJsonOptions),
         IFormattable f => f.ToString(null, CultureInfo.InvariantCulture) ?? "",
         _ => value.ToString() ?? ""
     };

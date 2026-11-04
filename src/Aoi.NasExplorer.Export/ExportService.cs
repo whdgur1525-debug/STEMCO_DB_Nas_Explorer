@@ -61,7 +61,7 @@ public static class ExportService
     }
     public static async IAsyncEnumerable<ResultRow> Enumerate(IEnumerable<ResultRow> rows)
     { foreach(var row in rows){yield return row;} await Task.CompletedTask; }
-    public static string Json(ResultRow row)=>JsonSerializer.Serialize(new{sourceDatabase=row.Database,fields=row.Values},new JsonSerializerOptions{WriteIndented=true});
+    public static string Json(ResultRow row)=>JsonSerializer.Serialize(new{sourceDatabase=row.Database,fields=row.Values},new JsonSerializerOptions{WriteIndented=true,NumberHandling=System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals});
 }
 
 public sealed record ErtDocument(string Text,IReadOnlyList<string> Notes,int Rows);

@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory=$true)][string]$SchemaFile,
     [Parameter(Mandatory=$true)][string]$DumpFile,
     [Parameter(Mandatory=$true)][string]$Dotnet,
+    [string]$SpacePreflightFile,
     [string]$PgBin='C:\Program Files\PostgreSQL\18\bin',
     [int]$Port=55741
 )
@@ -12,7 +13,15 @@ if($k.Date -eq [datetime]'2026-11-04' -and $k.Hour -lt 22){throw 'Do not run bef
 $os=Get-CimInstance Win32_OperatingSystem
 if($os.FreePhysicalMemory -lt 8GB/1KB){throw 'Less than 8GB RAM available. Defer large tests.'}
 $drive=Get-PSDrive -Name ([IO.Path]::GetPathRoot([IO.Path]::GetFullPath($WorkDir)).Substring(0,1))
-if($drive.Free -lt 20GB){throw 'At least 20GB free disk is required.'}
+[long]$requiredSpace=20GB
+if(![string]::IsNullOrWhiteSpace($SpacePreflightFile)){
+    $measurement=Get-Content -LiteralPath $SpacePreflightFile -Raw|ConvertFrom-Json
+    $dump=Get-Item -LiteralPath $DumpFile
+    if([IO.Path]::GetFullPath($measurement.Dump) -ne $dump.FullName -or $measurement.DumpBytes -ne $dump.Length -or $measurement.DumpSHA256 -ne (Get-FileHash -LiteralPath $DumpFile -Algorithm SHA256).Hash){throw 'The measured dump fingerprint does not match.'}
+    if($measurement.Rows -le 0 -or $measurement.ImageBytes -lt 0){throw 'Invalid dump size measurement.'}
+    $requiredSpace=[long]($measurement.ImageBytes*1.5+$measurement.Rows*4096+2GB)
+}
+if($drive.Free -lt $requiredSpace){throw ('Insufficient free disk; required bytes: '+$requiredSpace)}
 $root=Split-Path $PSScriptRoot -Parent
 $workPath=[IO.Path]::GetFullPath($WorkDir)
 $dbPath=Join-Path $workPath 'pgdata'

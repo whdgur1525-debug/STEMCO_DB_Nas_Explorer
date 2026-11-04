@@ -17,6 +17,7 @@ public partial class App : Application
         var window=new MainWindow(smoke);MainWindow=window;
         if(smoke)
         {
+            ShutdownMode=ShutdownMode.OnExplicitShutdown;
             window.Left=-20000;window.Top=-20000;window.WindowStartupLocation=WindowStartupLocation.Manual;window.ShowActivated=false;window.ShowInTaskbar=false;
             window.Show();
             if(stress){int failed=await window.RunStressUiChecksAsync(e.Args[1]);window.Close();Shutdown(failed==0?0:1);return;}

@@ -33,6 +33,7 @@ public partial class MainWindow : Window
     private int _databaseIndex;
     private string? _cursor;
     private bool _hasMore,_demo,_exporting;
+    private bool _clearFolderContext;
     private readonly bool _smoke;
     private ViewPreferences _view=new();
     private ImagePayload? _image;
@@ -52,6 +53,7 @@ public partial class MainWindow : Window
     public MainWindow(bool smoke=false)
     {
         InitializeComponent();_smoke=smoke;
+        VersionLabel.Text="읽기 전용  ·  v"+typeof(MainWindow).Assembly.GetName().Version?.ToString(3);
         if(!smoke)try{_profile=ProfileStore.Load();_view=ProfileStore.LoadView();Width=Math.Clamp(_view.Width,1100,3000);Height=Math.Clamp(_view.Height,720,2000);}catch(Exception ex){Log("연결·화면 설정을 읽지 못했습니다: "+ex.Message);}
     }
     private void Log(string text)
@@ -155,7 +157,22 @@ public partial class MainWindow : Window
     {
         static int? Int(TextBox t)=>string.IsNullOrWhiteSpace(t.Text)?null:int.TryParse(t.Text,out int n)?n:throw new ArgumentException("번호·코드는 정수로 입력하세요.");
         static double? Num(TextBox t)=>string.IsNullOrWhiteSpace(t.Text)?null:double.TryParse(t.Text,System.Globalization.NumberStyles.Float,System.Globalization.CultureInfo.InvariantCulture,out double n)?n:throw new ArgumentException("크기는 소수점 숫자로 입력하세요.");
-        var f=new SearchFilter{Text=SearchText.Text.Trim(),Model=ModelText.Text.Trim(),Lot=LotText.Text.Trim(),Layer=LayerText.Text.Trim(),Machine=MachineText.Text.Trim(),Panel=Int(PanelText),Pc=Int(PcText),DefectCode=Int(DefectText),VmsCode=Int(VmsText),AiCode=Int(AiText),CauseCode=Int(CauseCodeText),CauseText=CauseText.Text.Trim(),MinimumSize=Num(MinSizeText),MaximumSize=Num(MaxSizeText),From=FromDate.SelectedDate,UntilExclusive=ToDate.SelectedDate?.AddDays(1),VmsState=StateBox.SelectedIndex<=0?null:StateBox.SelectedIndex-1,Images=(ImageFilter)ImageFilterBox.SelectedIndex,LatestOnly=LatestCheck.IsChecked==true};f.Validate();return f;
+        var f=new SearchFilter{Text=SearchText.Text.Trim(),Model=ModelText.Text.Trim(),Lot=LotText.Text.Trim(),Layer=LayerText.Text.Trim(),Machine=MachineText.Text.Trim(),Panel=Int(PanelText),Pc=Int(PcText),DefectCode=Int(DefectText),VmsCode=Int(VmsText),AiCode=Int(AiText),CauseCode=Int(CauseCodeText),CauseText=CauseText.Text.Trim(),MinimumSize=Num(MinSizeText),MaximumSize=Num(MaxSizeText),From=FromDate.SelectedDate,UntilExclusive=ToDate.SelectedDate?.AddDays(1),VmsState=StateBox.SelectedIndex<=0?null:StateBox.SelectedIndex-1,Images=(ImageFilter)ImageFilterBox.SelectedIndex,LatestOnly=LatestCheck.IsChecked==true};
+        var selected=SelectedDatabases();bool sameSource=!_clearFolderContext&&_queryDatabases.Count==1&&selected.Length==1&&_queryDatabases[0]==selected[0];
+        bool sameLot=f.Model==_filter.Model&&f.Lot==_filter.Lot;bool sameLayer=sameLot&&f.Layer==_filter.Layer;
+        f=f with{LotId=sameSource&&sameLot?_filter.LotId:"",LayerId=sameSource&&sameLayer?_filter.LayerId:"",InspectionId=sameSource&&sameLayer&&LevelBox.SelectedIndex==(int)_level?_filter.InspectionId:""};
+        f.Validate();return f;
+    }
+    private void ShowFilterInputs(SearchFilter f)
+    {
+        var invariant=System.Globalization.CultureInfo.InvariantCulture;
+        SearchText.Text=f.Text;ModelText.Text=f.Model;LotText.Text=f.Lot;LayerText.Text=f.Layer;MachineText.Text=f.Machine;
+        PanelText.Text=f.Panel?.ToString(invariant)??"";PcText.Text=f.Pc?.ToString(invariant)??"";DefectText.Text=f.DefectCode?.ToString(invariant)??"";
+        VmsText.Text=f.VmsCode?.ToString(invariant)??"";AiText.Text=f.AiCode?.ToString(invariant)??"";CauseCodeText.Text=f.CauseCode?.ToString(invariant)??"";CauseText.Text=f.CauseText;
+        MinSizeText.Text=f.MinimumSize?.ToString("R",invariant)??"";MaxSizeText.Text=f.MaximumSize?.ToString("R",invariant)??"";
+        FromDate.SelectedDate=f.From;ToDate.SelectedDate=f.UntilExclusive?.AddDays(-1);StateBox.SelectedIndex=f.VmsState.HasValue?f.VmsState.Value+1:0;
+        ImageFilterBox.SelectedIndex=(int)f.Images;LatestCheck.IsChecked=f.LatestOnly;
+        if(ScopeBox.ItemsSource is IEnumerable<Scope> scopes)ScopeBox.SelectedItem=_queryDatabases.Count==1?scopes.FirstOrDefault(x=>x.Database==_queryDatabases[0])??scopes.First():scopes.FirstOrDefault();
     }
     private string[] SelectedDatabases()=>ScopeBox.SelectedItem is Scope {Database:not null} scope?new[]{scope.Database}:_databases.Where(x=>x.IsInspection).Select(x=>x.Name).ToArray();
     private async void Search_Click(object sender,RoutedEventArgs e)=>await RunAsync(ct=>BeginQueryAsync(ReadFilter(),(BrowseLevel)Math.Max(0,LevelBox.SelectedIndex),SelectedDatabases(),ct));
@@ -164,6 +181,7 @@ public partial class MainWindow : Window
     {
         if(history&&_queryDatabases.Count>0)_history.Push((_filter,_level,_queryDatabases.ToArray()));
         _detailCts?.Cancel();_filter=filter;_level=level;LevelBox.SelectedIndex=(int)level;_queryDatabases=databases.ToList();_databaseIndex=0;_cursor=null;_hasMore=_queryDatabases.Count>0;_rows.Clear();_failedDatabases.Clear();ThumbnailPanel.Children.Clear();
+        _clearFolderContext=false;ShowFilterInputs(filter);
         DefectImage.Source=null;_image=null;ImagePlaceholder.Visibility=Visibility.Visible;Details.ItemsSource=null;
         Breadcrumb.Text=$"{(_queryDatabases.Count==1?_queryDatabases[0]:"전체 DB")}  /  {string.Join(" / ",new[]{filter.Model,filter.Lot,filter.Layer}.Where(x=>x.Length>0))}  /  {LevelNames[(int)level]}";
         Notice.Text=_demo?"예제 데이터입니다. 실제 검사 결과가 아닙니다.":"DB별 순차 조회 · 열 정렬은 현재 표시된 목록에 적용 · NULL / 없는 컬럼은 상세에서 구분";
@@ -268,12 +286,21 @@ public partial class MainWindow : Window
         LoadFavorites();ConfigureNavigation();SaveView();Log("현재 검색을 즐겨찾기에 저장했습니다.");
     }
     private void LoadFavorites(){_favorites.Clear();foreach(var f in _view.Favorites.Where(x=>x.Source==(_demo?"demo":_profile.Identity)))_favorites.Add((f.Label,f.Filter,f.Level,f.Databases));}
-    private void RememberColumns(){foreach(var col in Results.Columns)if(col.ActualWidth>=65&&!string.IsNullOrEmpty(col.SortMemberPath))_view.ColumnWidths[col.SortMemberPath]=col.ActualWidth;}
+    private void RememberColumns()
+    {
+        foreach(var col in Results.Columns)
+        {
+            if(string.IsNullOrEmpty(col.SortMemberPath))continue;
+            if(col.Width.IsAbsolute&&col.ActualWidth>=65)_view.ColumnWidths[col.SortMemberPath]=col.ActualWidth;
+            else _view.ColumnWidths.Remove(col.SortMemberPath);
+        }
+    }
     private void SaveView(){if(_smoke)return;try{RememberColumns();if(WindowState==WindowState.Normal){_view.Width=Width;_view.Height=Height;}ProfileStore.SaveView(_view);}catch(Exception ex){Log("화면 설정 저장 실패: "+ex.Message);}}
     private void Clear_Click(object sender,RoutedEventArgs e)
     {
         foreach(var t in new[]{SearchText,ModelText,LotText,LayerText,MachineText,PanelText,PcText,DefectText,VmsText,AiText,CauseCodeText,CauseText,MinSizeText,MaxSizeText})t.Clear();
         FromDate.SelectedDate=ToDate.SelectedDate=null;StateBox.SelectedIndex=ImageFilterBox.SelectedIndex=0;LatestCheck.IsChecked=false;
+        _clearFolderContext=true;ScopeBox.SelectedIndex=0;
     }
     private string? PickFolder(string title)
     {var dialog=new OpenFolderDialog{Title=title,Multiselect=false};return dialog.ShowDialog(this)==true?dialog.FolderName:null;}

@@ -49,6 +49,6 @@
     </TabControl>
    </DockPanel></Border>
   </Grid>
-  <DockPanel Grid.Row="4" Margin="22,0"><TextBlock DockPanel.Dock="Right" Text="읽기 전용  ·  v0.1" Foreground="#7B8BA3"/><TextBlock x:Name="Status" Text="준비됨" Foreground="#51627D" TextTrimming="CharacterEllipsis"/></DockPanel>
+  <DockPanel Grid.Row="4" Margin="22,0"><TextBlock x:Name="VersionLabel" DockPanel.Dock="Right" Text="읽기 전용" Foreground="#7B8BA3"/><TextBlock x:Name="Status" Text="준비됨" Foreground="#51627D" TextTrimming="CharacterEllipsis"/></DockPanel>
  </Grid>
 </Window>

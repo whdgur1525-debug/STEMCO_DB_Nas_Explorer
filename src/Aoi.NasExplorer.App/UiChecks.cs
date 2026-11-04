@@ -58,6 +58,23 @@ public partial class MainWindow
         async Task Until(Func<bool> condition)
         {var start=DateTime.UtcNow;while(!condition()){if((DateTime.UtcNow-start).TotalSeconds>5)throw new TimeoutException("UI state did not settle");await Task.Delay(10);}}
         await Check("demo LOTs and DB scope",async()=>{await ShowDemoAsync();Assert(_rows.Count==12&&_queryDatabases.Single()=="예제_DB");Assert(ConnectionLabel.Text.Contains("예제"));});
+        await Check("folder search keeps the displayed model LOT and exact inspection",async()=>
+        {
+            var context=new SearchFilter{Model="PI-DEMO-01",Lot="LOT-20261104-001",Layer="L1",LotId="1",LayerId="1",InspectionId="1"};
+            await BeginQueryAsync(context,BrowseLevel.Defects,new[]{"예제_DB"},default);SearchText.Text="PIN";
+            var query=ReadFilter();Assert(query.Model==context.Model&&query.Lot==context.Lot&&query.Layer==context.Layer&&query.InspectionId=="1");
+            Assert(ScopeBox.SelectedItem is Scope{Database:"예제_DB"});
+        });
+        await Check("changing model removes incompatible physical row IDs",async()=>
+        {
+            await BeginQueryAsync(new(){Model="PI-DEMO-01",Lot="LOT-20261104-001",Layer="L1",LotId="1",LayerId="1",InspectionId="1"},BrowseLevel.Defects,new[]{"예제_DB"},default);
+            ModelText.Text="another model";var query=ReadFilter();Assert(query.LotId.Length==0&&query.LayerId.Length==0&&query.InspectionId.Length==0);
+        });
+        await Check("clear conditions clears hidden folder identifiers",async()=>
+        {
+            await BeginQueryAsync(new(){Model="PI-DEMO-01",LotId="1",LayerId="1",InspectionId="1"},BrowseLevel.Defects,new[]{"예제_DB"},default);
+            Clear_Click(new Button(),new System.Windows.RoutedEventArgs());var query=ReadFilter();Assert(query.Model.Length==0&&query.LotId.Length==0&&query.LayerId.Length==0&&query.InspectionId.Length==0);Assert(_filter.InspectionId=="1");
+        });
         await Check("model to LOT to layer to inspection to defects",async()=>
         {
             await BeginQueryAsync(new(),BrowseLevel.Models,new[]{"예제_DB"},default);
@@ -66,6 +83,18 @@ public partial class MainWindow
             Assert(_level==BrowseLevel.Defects&&_rows.Count>0);
         });
         await Check("main columns prioritize model and panel",()=>{Assert(Results.Columns[0].SortMemberPath=="model_name");Assert(Results.Columns[3].SortMemberPath=="panel_no");return Task.CompletedTask;});
+        await Check("automatic widths are not persisted before layout completes",async()=>
+        {
+            _view.ColumnWidths.Clear();await BeginQueryAsync(new(),BrowseLevel.Defects,new[]{"예제_DB"},default);
+            await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.ApplicationIdle);UpdateLayout();
+            var time=Results.Columns.Single(x=>x.SortMemberPath=="inspection_time");
+            var sample=new TextBlock{Text=ResultRow.ValueText(_rows[0]["inspection_time"]),FontFamily=Results.FontFamily,FontSize=Results.FontSize};sample.Measure(new System.Windows.Size(double.PositiveInfinity,double.PositiveInfinity));
+            double required=sample.DesiredSize.Width+4;
+            if(!time.Width.IsAuto||time.ActualWidth+1<required)throw new InvalidOperationException($"Expected Auto fitting {required}; actual={time.Width.UnitType}/{time.ActualWidth}");
+            RememberColumns();if(_view.ColumnWidths.ContainsKey("inspection_time"))throw new InvalidOperationException("Auto width was persisted");
+            time.Width=new DataGridLength(180);UpdateLayout();RememberColumns();if(_view.ColumnWidths["inspection_time"]!=180)throw new InvalidOperationException($"Manual width was not retained: {time.ActualWidth}");
+            time.Width=DataGridLength.Auto;RememberColumns();if(_view.ColumnWidths.ContainsKey("inspection_time"))throw new InvalidOperationException("Returning to Auto did not clear the persisted width");
+        });
         await Check("selection shows raw fields and decoded image",async()=>{Results.SelectedIndex=0;await Until(()=>_image is not null&&DefectImage.Source is not null);Assert(Details.Items.Count>20);Assert(DefectImage.Source is BitmapSource{PixelWidth:128,PixelHeight:128});});
         await Check("rapid selection retains newest row",async()=>{Results.SelectedIndex=3;Results.SelectedIndex=8;await Until(()=>_image?.DefectId==_rows[8].Text("defects"));Assert(DetailSource.Text.Contains(_rows[8].Text("defects")));});
         await Check("zoom is bounded and original scale works",()=>{SetZoom(100);Assert(ImageScale.ScaleX==24);SetZoom(0.0001);Assert(ImageScale.ScaleX==0.05);SetZoom(1);Assert(ImageScale.ScaleX==1);return Task.CompletedTask;});

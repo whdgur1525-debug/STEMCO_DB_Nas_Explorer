@@ -1,4 +1,4 @@
-Synapse NAS Explorer 0.1
+Synapse NAS Explorer 0.1.1
 
 NAS PostgreSQL에 저장된 검사 결과를 읽기 전용으로 탐색하는 별도 Windows x64 프로그램입니다.
 Handler, Vision, VMS, DataTransfer의 설치 파일을 교체하지 않습니다.
@@ -27,6 +27,9 @@ EXE의 --demo 옵션도 같은 기능입니다.
   공유하는 현장 구조에서는 해당 ID의 불량을 모두 읽습니다. PC 번호로 행을 버리지 않습니다.
 - 완료·진행·미완료 검사를 숨기지 않습니다. 실제 상태는 원본 상태 문자열로 표시합니다.
 - 원본 상세에서 NULL(값 미기록), 컬럼 없음(구형 DB), 실제 숫자 0을 구분합니다.
+- 배열의 NaN/Infinity/-Infinity도 버리지 않습니다. CSV 배열과 JSON에서는 유효한 JSON 문자열로 보존합니다.
+- 폴더를 연 뒤 검색하면 현재 모델·LOT·검사 ID 범위를 유지합니다. 모델이나 DB 범위를 바꾸면
+  다른 원본에 속한 물리 ID는 해제하며, 조건 초기화로 전체 범위 검색을 시작할 수 있습니다.
 - VMS UPDATE 이전의 판정 변경 이력이 DB에 보존되지 않았다면 과거 판정을 복원할 수 없습니다.
 - ARCHIVE 상태도 실제 DB가 남아 있으면 조회합니다. DROP 후 백업 파일만 남은 DB는 직접 열 수 없습니다.
 - 일부 DB 접근에 실패하면 실패 DB 수와 작업 기록을 표시합니다. 0건 조회로 성공 처리하지 않습니다.
@@ -73,6 +76,9 @@ net9는 개발 호환용이며 배포용 Publish는 net10만 허용합니다.
 대량·회수 DB 시험
   tools\Test-Nightly.ps1 -WorkDir <PRIVATE_WORK> -SchemaFile <SANITIZED_SCHEMA_SQL> -DumpFile <PGDMP> -Dotnet <NET10_DOTNET_EXE>
 시험은 전용 localhost 포트(55000~55999), 소유 확인 파일이 있는 별도 클러스터에서만 수행합니다.
+기본 디스크 조건은 20GB입니다. tools/Measure-Dump.ps1로 전체 COPY 스트림의 실제 이미지 크기를
+측정한 JSON을 -SpacePreflightFile로 지정하면, 덤프 경로·크기·SHA256 일치 확인 후
+image bytes*1.5 + rows*4096 + 2GB의 보수 예산으로 공간을 확인할 수 있습니다.
 2026-11-04 22:00 KST 이전에는 대량 시험을 실행할 수 없도록 시간 보호가 있습니다.
 회수 덤프 복원 시 --no-subscriptions --no-publications --no-owner --no-privileges를 적용합니다.
 기존 PostgreSQL 서비스와 운영 NAS는 시험 대상이 아닙니다.

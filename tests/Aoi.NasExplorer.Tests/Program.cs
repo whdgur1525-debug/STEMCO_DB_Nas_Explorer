@@ -48,6 +48,12 @@ internal static class Program
         await Check("raw signature remains raw",()=>Equal(".raw",ImageBytes.Extension(new byte[]{0,1,2})));
         await Check("database is part of row identity",()=>{var a=new ResultRow{Database="a",Values=new(){["defects"]=1}};var b=new ResultRow{Database="b",Values=new(){["defects"]=1}};True(a.Key("nas",BrowseLevel.Defects)!=b.Key("nas",BrowseLevel.Defects));});
         await Check("JSON preserves null and zero",()=>{string j=ExportService.Json(new(){Database="a",Values=new(){["missing"]=null,["zero"]=0}});True(j.Contains("\"missing\": null")&&j.Contains("\"zero\": 0"));});
+        await Check("non-finite source arrays remain visible",()=>Equal("[\"NaN\",\"Infinity\",\"-Infinity\"]",ResultRow.ValueText(new double[]{double.NaN,double.PositiveInfinity,double.NegativeInfinity})));
+        await Check("JSON preserves non-finite values as named strings",()=>
+        {
+            using var json=JsonDocument.Parse(ExportService.Json(new(){Values=new(){["d_attr"]=new double[]{double.NaN,double.PositiveInfinity},["size"]=double.NegativeInfinity}}));
+            Equal("NaN",json.RootElement.GetProperty("fields").GetProperty("d_attr")[0].GetString());Equal("-Infinity",json.RootElement.GetProperty("fields").GetProperty("size").GetString());
+        });
         var g=new ModelGeometry(2.2,0,0,100,100,new double[]{0},new double[]{0},100,100,new double[]{10,30},new double[]{10,30},10,10,100,100);
         var row=new ResultRow{Database="a",Values=new(){["defects"]=1,["unit_idx"]=1,["unit_x"]=1,["unit_y"]=1,["raw_x"]=1.5,["raw_y"]=2.5,["cad_x"]=3.9,["cad_y"]=4.1,["defect_type"]=2,["vms_state"]=1,["vms_code"]=4,["source_metadata_version"]=1,["source_block_idx"]=2,["source_axis_x"]=3,["source_axis_y"]=4}};
         await Check("ERT raw coordinates integer CAD and source block",()=>{var ert=ErtExporter.Render("C:\\test","model","lot","L1",1,new(2026,11,4,9,1,2),"VMS_COMPLETED",1,g,new[]{row});True(ert.Text.Contains("1.500000, 2.500000, 2, 0, 1, 3, 4")&&ert.Text.Contains(", 4, 1, , , B, -1, -1, 4, 3,"));Equal(5,ert.Text.Split("\r\n",StringSplitOptions.RemoveEmptyEntries).Length);});
