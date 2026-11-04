@@ -65,9 +65,10 @@ ERT는 DB 재구성본입니다. 과거에 생성했던 원본 .ert 파일을 �
 
 개발과 검증
 VS2022 17.12 이상 + .NET 9 SDK: AOI-NasExplorer.sln을 열어 개발 호환 타깃을 빌드할 수 있습니다.
-  powershell -File tools\Build.ps1
+자동화 스크립트는 PowerShell 7(pwsh)에서 실행합니다.
+  pwsh -File tools\Build.ps1
 배포용은 .NET 10 SDK로 만들며 .NET 10 런타임을 함께 담습니다.
-  powershell -File tools\Build.ps1 -Dotnet <NET10_DOTNET_EXE> -Framework net10.0 -Publish -OutputDir <OUTPUT>
+  pwsh -File tools\Build.ps1 -Dotnet <NET10_DOTNET_EXE> -Framework net10.0 -Publish -OutputDir <OUTPUT>
 새 프로그램의 .NET 10 배포본 실행에 VS2022나 .NET 9 설치는 필요하지 않습니다.
 net9는 개발 호환용이며 배포용 Publish는 net10만 허용합니다.
 
