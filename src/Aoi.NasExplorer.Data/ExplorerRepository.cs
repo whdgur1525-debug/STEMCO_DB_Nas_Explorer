@@ -11,6 +11,10 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
 {
     private readonly ConcurrentDictionary<string, IReadOnlyDictionary<string, string>> _schemas = new();
     private readonly SemaphoreSlim _sourceGate=new(1,1);
+    private readonly CancellationTokenSource _lifetime=new();
+    private int _disposed;
+    private static readonly SemaphoreSlim ConnectionBudget=new(2,2);
+    private static readonly ConcurrentDictionary<string,SemaphoreSlim> DatabaseLeases=new(StringComparer.Ordinal);
     private readonly Dictionary<string,(NpgsqlDataSource Source,long Used)> _sources=new(StringComparer.Ordinal);
     private long _sourceClock;
     private NpgsqlConnection? _snapshot;
@@ -24,35 +28,73 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
             Host = p.Host, Port = p.Port, Username = p.Username, Password = p.Password,
             Database = database, SslMode = ssl, RootCertificate = string.IsNullOrWhiteSpace(p.RootCertificate) ? null : p.RootCertificate,
             Timeout = Math.Min(p.TimeoutSeconds, 15), CommandTimeout = p.TimeoutSeconds, Pooling = true,
-            MaxPoolSize = 3, MinPoolSize = 0, ConnectionIdleLifetime = 20, ConnectionPruningInterval = 10,
+            MaxPoolSize = 1, MinPoolSize = 0, ConnectionIdleLifetime = 10, ConnectionPruningInterval = 5,
             ApplicationName = "AOI-NasExplorer", IncludeErrorDetail = false,
             Options = $"-c default_transaction_read_only=on -c statement_timeout={p.TimeoutSeconds * 1000} -c lock_timeout=2000 -c idle_in_transaction_session_timeout=30000"
         }.ConnectionString;
     }
     private async Task<NpgsqlConnection> OpenAsync(ConnectionProfile p, string db, CancellationToken ct,bool pool=true)
     {
+        p.Validate();
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed)!=0,this);
+        using var lifetime=CancellationTokenSource.CreateLinkedTokenSource(ct,_lifetime.Token);ct=lifetime.Token;
+        var databaseLease=DatabaseLeases.GetOrAdd(p.Identity+"/"+p.Username+"/"+db,_=>new SemaphoreSlim(1,1));
+        // Wait for a busy database before taking the process budget; a model lookup may need the other slot.
+        var wait=TimeSpan.FromSeconds(Math.Min(p.TimeoutSeconds,15));
+        if(!await databaseLease.WaitAsync(wait,ct).ConfigureAwait(false))throw new TimeoutException("같은 DB의 이전 조회가 끝나기를 기다리는 시간이 초과되었습니다. 잠시 뒤 다시 조회하세요.");
+        bool budget=false,transferred=false;
+        try
+        {
+            if(!await ConnectionBudget.WaitAsync(wait,ct).ConfigureAwait(false))throw new TimeoutException("조회 연결 예산 대기 시간이 초과되었습니다. 진행 중인 작업 후 다시 조회하세요.");budget=true;
+            var connection=await OpenCoreAsync(p,db,ct,pool).ConfigureAwait(false);int released=0;
+            System.Data.StateChangeEventHandler? handler=null;
+            void Release()
+            {
+                if(Interlocked.Exchange(ref released,1)!=0)return;
+                connection.StateChange-=handler;ConnectionBudget.Release();databaseLease.Release();
+            }
+            handler=(_,e)=>{if(e.CurrentState is System.Data.ConnectionState.Closed or System.Data.ConnectionState.Broken)Release();};
+            connection.StateChange+=handler;transferred=true;
+            if(connection.State!=System.Data.ConnectionState.Open){Release();await connection.DisposeAsync();throw new NpgsqlException("조회 연결이 열리기 전에 종료되었습니다.");}
+            return connection;
+        }
+        finally{if(!transferred){if(budget)ConnectionBudget.Release();databaseLease.Release();}}
+    }
+    private async Task<NpgsqlConnection> OpenCoreAsync(ConnectionProfile p,string db,CancellationToken ct,bool pool)
+    {
         string connectionString=ConnectionString(p,db);
         if(!pool)
         {
             var settings=new NpgsqlConnectionStringBuilder(connectionString){Pooling=false};var c=new NpgsqlConnection(settings.ConnectionString);
-            try{await c.OpenAsync(ct);return c;}catch{await c.DisposeAsync();throw;}
+            try{await c.OpenAsync(ct).ConfigureAwait(false);return c;}catch{await c.DisposeAsync();throw;}
         }
-        await _sourceGate.WaitAsync(ct);
+        NpgsqlDataSource source;
+        await _sourceGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed)!=0,this);
             if(!_sources.TryGetValue(connectionString,out var entry))
             {
-                if(_sources.Count>=6){var old=_sources.MinBy(x=>x.Value.Used);_sources.Remove(old.Key);old.Value.Source.Dispose();}
+                if(_sources.Count>=2){var old=_sources.MinBy(x=>x.Value.Used);_sources.Remove(old.Key);old.Value.Source.Dispose();}
                 entry=(NpgsqlDataSource.Create(connectionString),++_sourceClock);
             }
             else entry=(entry.Source,++_sourceClock);
             _sources[connectionString]=entry;
-            return await entry.Source.OpenConnectionAsync(ct);
+            source=entry.Source;
         }
+        finally{_sourceGate.Release();}
+        return await source.OpenConnectionAsync(ct).ConfigureAwait(false);
+    }
+    public async Task ReleaseIdleConnectionsAsync()
+    {
+        await _sourceGate.WaitAsync().ConfigureAwait(false);
+        try{foreach(var entry in _sources.Values)entry.Source.Dispose();_sources.Clear();}
         finally{_sourceGate.Release();}
     }
     public void Dispose()
     {
+        if(Interlocked.Exchange(ref _disposed,1)!=0)return;
+        _lifetime.Cancel();
         _sourceGate.Wait();try{foreach(var item in _sources.Values)item.Source.Dispose();_sources.Clear();}finally{_sourceGate.Release();}
     }
     private async Task<IReadOnlyDictionary<string, string>> SchemaAsync(ConnectionProfile p, NpgsqlConnection c, CancellationToken ct)
@@ -69,12 +111,14 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
     public void ClearSchemaCache() => _schemas.Clear();
     public async Task<IReadOnlyList<DatabaseInfo>> DiscoverAsync(ConnectionProfile p, CancellationToken ct)
     {
+        await ReleaseIdleConnectionsAsync();
         var result = new List<DatabaseInfo>();
         await using var c = await OpenAsync(p, p.ManagementDatabase, ct,false);
         var names = new List<string>();
         await using (var cmd = new NpgsqlCommand("SELECT datname FROM pg_database WHERE NOT datistemplate AND datallowconn ORDER BY datname COLLATE \"C\" DESC", c))
         await using (var r = await cmd.ExecuteReaderAsync(ct))
             while (await r.ReadAsync(ct)) names.Add(r.GetString(0));
+        await c.CloseAsync();
         var states = new Dictionary<string, string>(StringComparer.Ordinal);
         string? statusError = null;
         try
@@ -247,8 +291,10 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
     }
     public async Task<ModelGeometry> GeometryAsync(ConnectionProfile p,string model,string layer,CancellationToken ct)
     {
-        await using var c=await OpenAsync(p,p.ModelDatabase,ct);
-        await using var modelTransaction=await c.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead,ct);
+        bool reuse=_snapshot is not null&&_snapshotDatabase==p.ModelDatabase;
+        await using var owned=reuse?null:await OpenAsync(p,p.ModelDatabase,ct);
+        var c=reuse?_snapshot!:owned!;
+        await using var modelTransaction=reuse?null:await c.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead,ct);
         await using var cmd=new NpgsqlCommand("SELECT model_id FROM public.aoi_model WHERE model_name=@model",c);
         string fullName=model+"_Layer"+layer;
         cmd.Parameters.AddWithValue("model",fullName);

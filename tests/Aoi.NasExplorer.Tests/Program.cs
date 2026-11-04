@@ -33,7 +33,7 @@ internal static class Program
         await Check("profile rejects invalid port",()=>Throws<ArgumentException>(()=>new ConnectionProfile{Host="a",Port=0}.Validate()));
         await Check("query rejects reversed dates",()=>Throws<ArgumentException>(()=>new SearchFilter{From=new(2026,11,4),UntilExclusive=new(2026,11,3)}.Validate()));
         await Check("query rejects NaN",()=>Throws<ArgumentException>(()=>new SearchFilter{MinimumSize=double.NaN}.Validate()));
-        await Check("connection strings escape password delimiters",()=>{var p=new ConnectionProfile{Host="127.0.0.1",Password="a;b='quoted'"};var b=new NpgsqlConnectionStringBuilder(ExplorerRepository.ConnectionString(p,"test"));Equal(p.Password,b.Password);True(b.Options!.Contains("default_transaction_read_only=on"));Equal(3,b.MaxPoolSize);True(!b.IncludeErrorDetail);});
+        await Check("connection strings escape password delimiters",()=>{var p=new ConnectionProfile{Host="127.0.0.1",Password="a;b='quoted'"};var b=new NpgsqlConnectionStringBuilder(ExplorerRepository.ConnectionString(p,"test"));Equal(p.Password,b.Password);True(b.Options!.Contains("default_transaction_read_only=on"));Equal(1,b.MaxPoolSize);True(!b.IncludeErrorDetail);});
         await Check("LIKE literal percent and underscore",()=>Equal("%a!%!_!!%",ExplorerRepository.Like("a%_!")));
         await Check("CSV quote and newline",()=>Equal("\"a\"\"b\nc\"",ExportService.CsvCell("a\"b\nc")));
         await Check("CSV spreadsheet formula escaped",()=>Equal("\"'=1+2\"",ExportService.CsvCell("=1+2")));
@@ -62,6 +62,18 @@ internal static class Program
         await Check("ERT rejects comma in header fields",()=>Throws<InvalidDataException>(()=>ErtExporter.Render("C:\\test","m,x","l","L1",1,new(2026,11,4),"COMPLETED",1,g,new[]{row})));
         await Check("ERT missing raw coordinates cannot be invented",()=>{var values=new Dictionary<string,object?>(row.Values);values["raw_x"]=null;Throws<InvalidDataException>(()=>ErtExporter.Render("C:\\test","m","l","L1",1,new(2026,11,4),"COMPLETED",1,g,new[]{new ResultRow{Values=values}}));});
         await Check("geometry excludes configured punch units",()=>Equal(3,(g with{PunchApply=true,PunchUnits=new[]{1}}).TotalUnits));
+        await Check("punch evidence requires raw and CAD coordinates plus both recorded attributes",()=>
+        {
+            var values=new Dictionary<string,object?>(row.Values){["raw_x"]=512d,["raw_y"]=512d,["cad_x"]=511d,["cad_y"]=512d,["d_attr"]=new double[]{9999,10},["vms_state"]=0,["defect_type"]=1,["defect_size"]=1.25};
+            var ordinary=new ResultRow{Database="a",Values=values};True(!ExportService.IsRecordedPunch(ordinary));
+            True(ErtExporter.Render("C:\\test","m","l","L1",1,new(2026,11,4),"COMPLETED",1,g,new[]{ordinary}).Text.Contains(", 1.250000,"));
+            values["cad_x"]=512d;True(ExportService.IsRecordedPunch(new(){Values=values}));
+        });
+        await Check("unreviewed alignment and inspection errors preserve forced bad markers",()=>
+        {
+            foreach(int code in new[]{19,20})
+            {var error=new ResultRow{Values=new(row.Values){["defect_type"]=code,["vms_state"]=0}};True(ErtExporter.Render("C:\\test","m","l","L1",1,new(2026,11,4),"COMPLETED",1,g,new[]{error}).Text.Contains(", B, -1, -1,"));}
+        });
         await Check("atomic output never overwrites existing file",async()=>{string path=Path.Combine(output,"existing.txt");await File.WriteAllTextAsync(path,"original");try{await ExportService.WriteNewAsync(path,"new",default);throw new Exception("Expected IOException");}catch(IOException){}Equal("original",await File.ReadAllTextAsync(path));});
         await Check("CSV streams all input and writes provenance",async()=>{string path=Path.Combine(output,"csv-"+Guid.NewGuid().ToString("N")+".csv");long count=await ExportService.CsvAsync(path,ExportService.Enumerate(new[]{row,row}),default);Equal(2L,count);True((await File.ReadAllTextAsync(path)).StartsWith("\"source_database\","));});
         await Check("cancelled CSV not exposed as completed output",async()=>{string path=Path.Combine(output,"cancel-"+Guid.NewGuid().ToString("N")+".csv");using var cts=new CancellationTokenSource();cts.Cancel();try{await ExportService.CsvAsync(path,ExportService.Enumerate(new[]{row}),cts.Token);throw new Exception("Expected cancellation");}catch(OperationCanceledException){}True(!File.Exists(path));});
@@ -270,6 +282,30 @@ CREATE TABLE defects(defects uuid PRIMARY KEY,inspection uuid,unit_idx int,unit_
             for(int timeout=10;timeout<24;timeout++)Equal(2,(await repo.QueryAsync(p with{TimeoutSeconds=timeout},db1,BrowseLevel.Models,new(),10,null,default)).Rows.Count);
             Equal(2,(await repo.QueryAsync(p,db1,BrowseLevel.Models,new(),10,null,default)).Rows.Count);
         });
+        await Check("same database wait can be cancelled or timed out without leaking the connection budget",async()=>
+        {
+            await repo.WithSnapshotAsync(p,db1,async(scoped,_,ct)=>
+            {
+                using var cancel=new CancellationTokenSource(70);
+                try{await repo.QueryAsync(p,db1,BrowseLevel.Models,new(),10,null,cancel.Token);throw new Exception("Expected cancelled lease wait");}catch(OperationCanceledException){}
+                var clock=Stopwatch.StartNew();
+                try{await repo.QueryAsync(p with{TimeoutSeconds=1},db1,BrowseLevel.Models,new(),10,null,ct);throw new Exception("Expected bounded lease wait");}catch(TimeoutException){}
+                True(clock.Elapsed<TimeSpan.FromSeconds(3));Equal(2,(await scoped.QueryAsync(p,db1,BrowseLevel.Models,new(),10,null,ct)).Rows.Count);
+            },default);
+            Equal(2,(await Q(BrowseLevel.Models)).Rows.Count);
+        });
+        await Check("disposing idle pools does not break an active snapshot or its next query",async()=>
+        {
+            await repo.WithSnapshotAsync(p,db1,async(scoped,_,ct)=>
+            {await repo.ReleaseIdleConnectionsAsync();Equal(5L,(await scoped.SummaryAsync(p,db1,new(),ct)).Defects);},default);
+            Equal(2,(await Q(BrowseLevel.Models)).Rows.Count);
+        });
+        await Check("model lookup reuses an existing snapshot in the same database",async()=>
+        {
+            using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            await repo.WithSnapshotAsync(p,p.ModelDatabase,async(scoped,_,ct)=>
+            {True((await scoped.GeometryAsync(p,"MODEL_A","L1",ct)).BlockX.Length>0);},deadline.Token);
+        });
         async Task<string> ImageFile(ResultRow row,ImagePayload image,string folder,CancellationToken ct)
         {Directory.CreateDirectory(folder);string path=Path.Combine(folder,"defect_"+row.Text("defects")+".bin");await File.WriteAllBytesAsync(path,image.Bytes,ct);return path;}
         string BundleRoot(string name)=>Path.Combine(output,"bundle-"+name+"-"+Guid.NewGuid().ToString("N"));
@@ -317,19 +353,25 @@ CREATE TABLE defects(defects uuid PRIMARY KEY,inspection uuid,unit_idx int,unit_
             using var receipt=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(root,"내보내기결과.json")));
             Equal("cancelled",receipt.RootElement.GetProperty("status").GetString());Equal(5,(await Q(BrowseLevel.Defects)).Rows.Count);
         });
-        await Check("bundle keeps all panels on one DB snapshot during concurrent inserts and image changes",async()=>
+        await Check("bundle fixes inspection IDs then releases each panel snapshot before file conversion",async()=>
         {
             try
             {
                 bool changed=false;string root=BundleRoot("live");
                 var result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){LotId="1"})},new(false,true,true,false),async(row,image,folder,ct)=>
                 {
-                    if(!changed){changed=true;await Admin(p,db1,"UPDATE defects SET image=decode('aabbccdd','hex') WHERE defects=1;INSERT INTO defects(defects,inspection,unit_idx) VALUES(999,1,999)");}
-                    if(row.Text("defects")=="1")Equal((byte)0,image.Bytes[0]);return await ImageFile(row,image,folder,ct);
+                    if(!changed)
+                    {
+                        changed=true;
+                        // This would fail while any bundle snapshot retained an ACCESS SHARE lock.
+                        await Admin(p,db1,"BEGIN;LOCK TABLE defects IN ACCESS EXCLUSIVE MODE NOWAIT;ROLLBACK;");
+                        await Admin(p,db1,"UPDATE defects SET image=decode('aabbccdd','hex') WHERE defects=1;INSERT INTO defects(defects,inspection,unit_idx) VALUES(999,1,999);INSERT INTO inspection(inspection,layer,machine_id,pc_no,panel_no,time,status) VALUES(998,1,'EQ09',0,998,now(),'COMPLETED');INSERT INTO defects(defects,inspection,unit_idx) VALUES(998,998,998)");
+                    }
+                    if(row.Text("defects")=="1")Equal((byte)0xaa,image.Bytes[0]);return await ImageFile(row,image,folder,ct);
                 },null,default);
-                Equal(4L,result.Defects);Equal(4L,result.Panels);Equal(2L,result.Images);Equal(6,(await Q(BrowseLevel.Defects)).Rows.Count);
+                Equal(5L,result.Defects);Equal(4L,result.Panels);Equal(2L,result.Images);Equal(7,(await Q(BrowseLevel.Defects)).Rows.Count);
             }
-            finally{await Admin(p,db1,"DELETE FROM defects WHERE defects=999;UPDATE defects SET image=decode('00010203','hex') WHERE defects=1");}
+            finally{await Admin(p,db1,"DELETE FROM defects WHERE defects IN(998,999);DELETE FROM inspection WHERE inspection=998;UPDATE defects SET image=decode('00010203','hex') WHERE defects=1");}
         });
         await Check("zero-defect panel bundle still writes ERT and a zero count row",async()=>
         {
@@ -350,6 +392,24 @@ CREATE TABLE defects(defects uuid PRIMARY KEY,inspection uuid,unit_idx int,unit_
                 Equal("778",(await Q(BrowseLevel.Inspections,new(){LotId="1",Layer="L1-T-SHORT3.1-0200"})).Rows.Single().Text("inspection"));
             }
             finally{await Admin(p,db1,"DELETE FROM inspection WHERE inspection IN(777,778);DELETE FROM layer WHERE layer IN(777,778)");}
+        });
+        await Check("Handler sidecar-only bundle distinguishes recorded zero from NULL and reports reconstruction limits",async()=>
+        {
+            try
+            {
+                await Admin(p,db1,"UPDATE inspection SET disposed_bar_mask=0 WHERE inspection=1");
+                string root=BundleRoot("handler-zero");
+                var result=await InspectionBundleExporter.ExportAsync(repo,p with{ModelDatabase="missing_model_must_not_be_queried"},root,new[]{new BundleScope(db1,new(){InspectionId="1"})},new(false,false,false,false,HandlerFiles:true),ImageFile,null,default);
+                Equal(0L,result.Failures);True(result.Unrecoverable>0);Equal("completed_with_limitations",result.Status);
+                string layer=Path.Combine(root,"EQ09","MODEL_A","LOT_A","L1");
+                Equal("0",(await File.ReadAllTextAsync(Path.Combine(layer,"1","block_dispose.txt"))).Trim());
+                Equal("Panel No,MaskingBar",(await File.ReadAllTextAsync(Path.Combine(layer,"Bar_result_LOT_A.txt"))).Trim());
+                await Admin(p,db1,"UPDATE inspection SET disposed_bar_mask=NULL WHERE inspection=1");
+                root=BundleRoot("handler-null");result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){InspectionId="1"})},new(false,false,false,false,HandlerFiles:true),ImageFile,null,default);
+                Equal(0L,result.Failures);True(result.Unrecoverable>0);True(!Directory.GetFiles(root,"block_dispose.txt",SearchOption.AllDirectories).Any());
+                using var receipt=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(root,"내보내기결과.json")));True(receipt.RootElement.GetProperty("unrecoverable").GetInt64()>0);
+            }
+            finally{await Admin(p,db1,"UPDATE inspection SET disposed_bar_mask=NULL WHERE inspection=1");}
         });
     }
     private static async Task StressAsync(string output)

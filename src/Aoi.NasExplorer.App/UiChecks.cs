@@ -188,7 +188,7 @@ public partial class MainWindow
         });
         await Check("export pauses navigation and refresh then restores them",async()=>
         {
-            _view.RefreshSeconds=30;var prior=_lastRefresh;bool executed=false;
+            _view.RefreshSeconds=60;var prior=_lastRefresh;bool executed=false;
             await RunAsync(async ct=>
             {
                 executed=true;Assert(!BackButton.IsEnabled&&!ForwardButton.IsEnabled&&!Navigation.IsEnabled&&!SearchButton.IsEnabled&&!Results.IsEnabled&&!CsvButton.IsEnabled&&CancelButton.IsEnabled);
@@ -198,9 +198,9 @@ public partial class MainWindow
         });
         await Check("automatic refresh runs when due and preserves pending search edits",async()=>
         {
-            await ShowDemoAsync();_view.RefreshSeconds=30;_lastRefreshAttempt=DateTimeOffset.Now.AddSeconds(-31);var prior=_lastRefresh;int history=_history.Count;
+            await ShowDemoAsync();_view.RefreshSeconds=60;_nextAutoRefreshAt=DateTimeOffset.Now.AddSeconds(-1);var prior=_lastRefresh;int history=_history.Count;
             await Task.Delay(20);await AutoRefreshTickAsync(true);Assert(_lastRefresh>prior&&_history.Count==history);
-            SearchText.Text="pending search";_lastRefreshAttempt=DateTimeOffset.Now.AddSeconds(-31);prior=_lastRefresh;
+            SearchText.Text="pending search";_nextAutoRefreshAt=DateTimeOffset.Now.AddSeconds(-1);prior=_lastRefresh;
             await AutoRefreshTickAsync(true);Assert(_lastRefresh==prior&&SearchText.Text=="pending search");_view.RefreshSeconds=0;
         });
         await Check("output collisions and unwritable parent are diagnosed before export",()=>
@@ -248,7 +248,7 @@ public partial class MainWindow
         await Check("central LOT bundle includes every panel and refresh protects checks",async()=>
         {
             await ShowDemoAsync();SearchText.Text="agsd";SearchTargetBox.SelectedIndex=0;await SearchGlobalAsync();SetVisibleChecks(true);
-            _view.RefreshSeconds=30;_lastRefreshAttempt=DateTimeOffset.Now.AddSeconds(-31);var previous=_lastRefresh;await AutoRefreshTickAsync(true);Assert(_lastRefresh==previous&&_checkedRecords.Count==1);_view.RefreshSeconds=0;
+            _view.RefreshSeconds=60;_nextAutoRefreshAt=DateTimeOffset.Now.AddSeconds(-1);var previous=_lastRefresh;await AutoRefreshTickAsync(true);Assert(_lastRefresh==previous&&_checkedRecords.Count==1);_view.RefreshSeconds=0;
             string root=Path.Combine(folder,"central-lot");await RunAsync(ct=>RunBundleAsync(root,CreateBundleScopes(BundleMode.Checked,null),new(true,false,true,false),ct),true);
             using var result=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(root,"내보내기결과.json")));Assert(result.RootElement.GetProperty("panels").GetInt64()==6&&result.RootElement.GetProperty("defects").GetInt64()==72&&result.RootElement.GetProperty("ertFiles").GetInt64()==6);
         });
@@ -261,8 +261,38 @@ public partial class MainWindow
             var frame=new Border{Child=body,Background=System.Windows.Media.Brushes.White,Padding=new System.Windows.Thickness(22)};frame.Measure(new System.Windows.Size(650,double.PositiveInfinity));frame.Arrange(new System.Windows.Rect(0,0,650,frame.DesiredSize.Height));frame.UpdateLayout();
             var bitmap=new RenderTargetBitmap(650,(int)Math.Ceiling(frame.ActualHeight),96,96,PixelFormats.Pbgra32);bitmap.Render(frame);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));using(var stream=File.Create(Path.Combine(folder,"내보내기창.png")))encoder.Save(stream);dialog.Close();return Task.CompletedTask;
         });
+        await Check("checked image export writes only checked defects and resets stale image details",async()=>
+        {
+            await ShowDemoAsync(true);await Until(()=>_image is not null);
+            var selected=_rows.Take(2).ToArray();string root=Path.Combine(folder,"checked-images-only");
+            await RunAsync(ct=>SaveCheckedImagesAsync(root,selected,ct),true);
+            Assert(Directory.GetFiles(root,"*.png",SearchOption.AllDirectories).Length==2);
+            using var result=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(root,"결과.json")));
+            Assert(result.RootElement.GetProperty("saved").GetInt64()==2&&result.RootElement.GetProperty("selected").GetInt32()==2);
+            await ShowDemoAsync();Assert(!ImageInfo.Text.Contains("16384")&&!ImageInfo.Text.Contains("16,384"));
+            UpdateResultContextMenu();Assert(!Results.ContextMenu.Items.OfType<MenuItem>().Single(x=>Convert.ToString(x.Tag)=="ert").IsEnabled);
+        });
+        await Check("modal dialog scope defers idle pause and resets inactivity on return",()=>
+        {
+            ShowModal(()=>{_lastUserInteraction=DateTimeOffset.Now.AddMinutes(-11);Assert(!EnterIdleIfDueAsync().GetAwaiter().GetResult()&&!_idleLocked);return null;});
+            Assert(DateTimeOffset.Now-_lastUserInteraction<TimeSpan.FromSeconds(1));return Task.CompletedTask;
+        });
+        await Check("idle pause disables automatic reads and resumes only through explicit refresh",async()=>
+        {
+            _lastUserInteraction=DateTimeOffset.Now.AddMinutes(-11);_view.RefreshSeconds=60;await AutoRefreshTickAsync(true);
+            Assert(_idleLocked&&IdleOverlay.Visibility==System.Windows.Visibility.Visible&&_view.RefreshSeconds==0&&AutoRefreshBox.SelectedIndex==0);
+            bool ran=false;await RunAsync(_=>{ran=true;return Task.CompletedTask;});Assert(!ran);
+            await ResumeSessionAsync();Assert(!_idleLocked&&IdleOverlay.Visibility==System.Windows.Visibility.Collapsed&&_view.RefreshSeconds==0);
+        });
+        await Check("refresh cadence begins after completion with at least one minute and jitter",async()=>
+        {
+            _view.RefreshSeconds=60;await RefreshCurrentAsync();
+            Assert(_nextAutoRefreshAt>=_lastRefresh!.Value.AddSeconds(60)&&_nextAutoRefreshAt<=DateTimeOffset.Now.AddSeconds(76));
+            _view.RefreshSeconds=0;ScheduleAutoRefresh();
+        });
         await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.ApplicationIdle);UpdateLayout();
-        var visual=(System.Windows.FrameworkElement)Content;var screen=new RenderTargetBitmap((int)visual.ActualWidth,(int)visual.ActualHeight,96,96,PixelFormats.Pbgra32);screen.Render(visual);var screenshot=new PngBitmapEncoder();screenshot.Frames.Add(BitmapFrame.Create(screen));using(var file=File.Create(Path.Combine(folder,"예제_새화면.png")))screenshot.Save(file);
+        var visual=(System.Windows.FrameworkElement)Content;var screen=new RenderTargetBitmap((int)visual.ActualWidth,(int)visual.ActualHeight,96,96,PixelFormats.Pbgra32);screen.Render(visual);var screenshot=new PngBitmapEncoder();screenshot.Frames.Add(BitmapFrame.Create(screen));
+        using(var file=File.Create(Path.Combine(folder,"예제_새화면.png")))screenshot.Save(file);
         await File.WriteAllTextAsync(Path.Combine(folder,"ui-results.json"),JsonSerializer.Serialize(new{failed,checks},new JsonSerializerOptions{WriteIndented=true}));
         return failed;
     }

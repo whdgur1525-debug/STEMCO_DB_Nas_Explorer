@@ -1,4 +1,4 @@
-﻿using System.Data;
+using System.Data;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
@@ -68,6 +68,7 @@ public partial class MainWindow : Window
     }
     private async Task RunAsync(Func<CancellationToken,Task> action,bool export=false)
     {
+        if(_idleLocked&&!_resuming)return;
         if(_exporting){Status.Text="추출 중입니다. 완료하거나 취소한 뒤 이동하세요.";return;}
         _queryCts?.Cancel();var cts=new CancellationTokenSource();_queryCts=cts;_exporting=export;
         if(export){_detailCts?.Cancel();_exportSnapshots.Clear();}
@@ -80,7 +81,7 @@ public partial class MainWindow : Window
         {
             if(ReferenceEquals(_queryCts,cts))
             {
-                _exporting=false;_queryCts=null;UpdateActions();
+                _exporting=false;_queryCts=null;ScheduleAutoRefresh();UpdateActions();
                 if(export&&IsLoaded&&Selected() is not null&&_detailCts?.IsCancellationRequested==true&&(_level!=BrowseLevel.Defects||DefectImage.Source is null))
                     Results_SelectionChanged(Results,new SelectionChangedEventArgs(System.Windows.Controls.Primitives.Selector.SelectionChangedEvent,Array.Empty<object>(),Array.Empty<object>()));
             }
@@ -90,7 +91,7 @@ public partial class MainWindow : Window
     private async void Connect_Click(object sender,RoutedEventArgs e)
     {
         if(_exporting)return;
-        var dialog=new ConnectionWindow(_profile){Owner=this};if(dialog.ShowDialog()!=true||dialog.Profile is null)return;
+        var dialog=new ConnectionWindow(_profile){Owner=this};if(ShowModal(()=>dialog.ShowDialog())!=true||dialog.Profile is null)return;
         var next=dialog.Profile;
         await ConnectProfileAsync(next,dialog.Remember);
     }
@@ -212,12 +213,12 @@ public partial class MainWindow : Window
         UpdatePath(filter,level,databases.ToArray(),trail,allDatabases);
         _detailCts?.Cancel();_filter=filter;_level=level;_allDatabases=allDatabases;LevelBox.SelectedIndex=(int)level;_queryDatabases=databases.ToList();_databaseIndex=0;_cursor=null;_hasMore=_queryDatabases.Count>0;_rows.Clear();_failedDatabases.Clear();ThumbnailPanel.Children.Clear();
         _clearFolderContext=false;ShowFilterInputs(filter);
-        DefectImage.Source=null;_image=null;ImagePlaceholder.Visibility=Visibility.Visible;Details.ItemsSource=null;
+        DefectImage.Source=null;_image=null;ImagePlaceholder.Visibility=Visibility.Visible;ImagePlaceholder.Text="불량을 선택하면 이미지를 표시합니다";ImageInfo.Text="휠로 확대 · 스크롤로 이동 · 방향키로 목록 이동";Details.ItemsSource=null;
         Breadcrumb.Text=$"DB: {(_queryDatabases.Count==1?_queryDatabases[0]:"전체 검사 DB")} · 현재 목록: {LevelNames[(int)level]}";
         RenderScopePath();
         Notice.Text=_demo?"예제 데이터입니다. 실제 검사 결과가 아닙니다.":"DB별 순차 조회 · 열 정렬은 현재 표시된 목록에 적용 · NULL / 없는 컬럼은 상세에서 구분";
         BindRows();await LoadPageAsync(ct);await LoadSummaryAsync(ct);
-        _lastRefresh=DateTimeOffset.Now;UpdateRefreshLabel();UpdateActions();
+        _lastRefresh=DateTimeOffset.Now;ScheduleAutoRefresh();UpdateRefreshLabel();UpdateActions();
     }
     private async Task LoadPageAsync(CancellationToken ct)
     {
@@ -278,7 +279,7 @@ public partial class MainWindow : Window
         _detailCts?.Cancel();var cts=new CancellationTokenSource();_detailCts=cts;
         _detailLoading=false;if(Selected() is not ResultRow row)return;
         _detailLoading=true;
-        _image=null;DefectImage.Source=null;ImagePlaceholder.Visibility=Visibility.Visible;ImagePlaceholder.Text="선택한 기록 읽는 중…";
+        _image=null;DefectImage.Source=null;ImagePlaceholder.Visibility=Visibility.Visible;ImagePlaceholder.Text="선택한 기록 읽는 중…";ImageInfo.Text="선택한 기록의 이미지 확인 중…";
         try
         {
             var key=row.Key(_profile.Identity,_level);
@@ -292,7 +293,7 @@ public partial class MainWindow : Window
             var loadedImage=await _repository.ImageAsync(_profile,key,cts.Token);cts.Token.ThrowIfCancellationRequested();_image=loadedImage;
             if(_image is null||_image.Bytes.Length==0){ImagePlaceholder.Text="이 기록에는 저장된 이미지가 없습니다";ImageInfo.Text="이미지 없음 · 원본 상세는 확인 가능";return;}
             var bitmap=CachedBitmap(_image);cts.Token.ThrowIfCancellationRequested();DefectImage.Source=bitmap;ImagePlaceholder.Visibility=Visibility.Collapsed;FitImage();
-            ImageInfo.Text=$"{bitmap.PixelWidth} × {bitmap.PixelHeight} · {_image.Bytes.Length:N0} bytes · {_image.Channels}채널";
+            ImageInfo.Text=$"{bitmap.PixelWidth} × {bitmap.PixelHeight} · {_image.Bytes.Length:N0} bytes · {_image.Channels}채널 · 우클릭 저장";
         }
         catch(OperationCanceledException){}
         catch(Exception ex){if(ReferenceEquals(_detailCts,cts)){ImagePlaceholder.Text=ExplorerRepository.SafeError(ex);Log(ExplorerRepository.SafeError(ex));}}
@@ -338,7 +339,7 @@ public partial class MainWindow : Window
         _clearFolderContext=true;ScopeBox.SelectedIndex=0;
     }
     private string? PickFolder(string title)
-    {var dialog=new OpenFolderDialog{Title=title,Multiselect=false};return dialog.ShowDialog(this)==true?dialog.FolderName:null;}
+    {var dialog=new OpenFolderDialog{Title=title,Multiselect=false};return ShowModal(()=>dialog.ShowDialog(this))==true?dialog.FolderName:null;}
     private async IAsyncEnumerable<ResultRow> AllRows(SearchFilter filter,BrowseLevel level,string[] databases,[EnumeratorCancellation]CancellationToken ct,bool images=false)
     {
         var repo=_repository;var profile=_profile;
@@ -350,7 +351,7 @@ public partial class MainWindow : Window
     private async void ExportCsv_Click(object sender,RoutedEventArgs e)
     {
         if(_queryDatabases.Count==0)return;
-        var dialog=new SaveFileDialog{Filter="CSV 파일|*.csv",FileName=$"검사결과_{DateTime.Now:yyyyMMdd_HHmmss}.csv",OverwritePrompt=false};if(dialog.ShowDialog(this)!=true)return;
+        var dialog=new SaveFileDialog{Filter="CSV 파일|*.csv",FileName=$"검사결과_{DateTime.Now:yyyyMMdd_HHmmss}.csv",OverwritePrompt=false};if(ShowModal(()=>dialog.ShowDialog(this))!=true)return;
         if(File.Exists(dialog.FileName)){Notice.Text="기존 파일을 보존하려면 새 파일명을 선택하세요.";return;}
         var f=_filter;var level=_level;var dbs=_queryDatabases.ToArray();string path=dialog.FileName;
         await RunAsync(async ct=>
@@ -365,7 +366,7 @@ public partial class MainWindow : Window
     private async void ExportJson_Click(object sender,RoutedEventArgs e)
     {
         if(Selected() is not ResultRow selected)return;
-        var dialog=new SaveFileDialog{Filter="JSON 파일|*.json",FileName="원본_"+DateTime.Now.ToString("yyyyMMdd_HHmmss")+".json"};if(dialog.ShowDialog(this)!=true)return;
+        var dialog=new SaveFileDialog{Filter="JSON 파일|*.json",FileName="원본_"+DateTime.Now.ToString("yyyyMMdd_HHmmss")+".json"};if(ShowModal(()=>dialog.ShowDialog(this))!=true)return;
         var level=_level;
         await RunAsync(async ct=>{PrepareOutput(dialog.FileName);var detail=level==BrowseLevel.Models?selected:await _repository.DetailAsync(_profile,selected.Key(_profile.Identity,level),ct);await ExportService.WriteNewAsync(dialog.FileName,ExportService.Json(detail),ct);SetOutput(dialog.FileName,"선택 JSON 저장 완료");},true);
     }
@@ -464,12 +465,12 @@ public partial class MainWindow : Window
                 ct.ThrowIfCancellationRequested();
                 try
                 {
+                    var geometry=await _repository.GeometryAsync(_profile,selectedInspection.Text("model_name"),selectedInspection.Text("layer_name"),ct);
                     await _repository.WithSnapshotAsync(_profile,selectedInspection.Database,async(snapshot,captured,token)=>
                     {
                     RecordSnapshot(selectedInspection.Database,captured);
                     var inspection=(await snapshot.QueryAsync(_profile,selectedInspection.Database,BrowseLevel.Inspections,new(){InspectionId=selectedInspection.Text("inspection")},1,null,token)).Rows.Single();
                     var detail=await snapshot.DetailAsync(_profile,inspection.Key(_profile.Identity,BrowseLevel.Inspections),token);
-                    var geometry=await _repository.GeometryAsync(_profile,inspection.Text("model_name"),inspection.Text("layer_name"),ct);
                     string output=Path.Combine(root,ExportService.SafeComponent(inspection.Text("model_name")),ExportService.SafeComponent(inspection.Text("lot_id_name")),ExportService.SafeComponent(inspection.Text("layer_name")),ExportService.SafeComponent(inspection.Database),ExportService.SafeComponent($"{inspection.Text("machine_id")}_PC{inspection.Text("pc_no")}_I{inspection.Text("inspection")}"));
                     DateTime time=inspection["inspection_time"] is DateTime t?t:throw new InvalidDataException("검사 시각 미기록");
                     string path=Path.Combine(output,$"{inspection.Long("panel_no"):D3}.ert");Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
@@ -499,11 +500,11 @@ public partial class MainWindow : Window
         if(_level!=BrowseLevel.Inspections||Selected() is not ResultRow selectedInspection){Notice.Text="검사 이력 목록에서 미리 볼 검사를 선택하세요.";return;}
         await RunAsync(async ct=>
         {
+            var geometry=await _repository.GeometryAsync(_profile,selectedInspection.Text("model_name"),selectedInspection.Text("layer_name"),ct);
             await _repository.WithSnapshotAsync(_profile,selectedInspection.Database,async(snapshot,captured,token)=>
             {
             var inspection=(await snapshot.QueryAsync(_profile,selectedInspection.Database,BrowseLevel.Inspections,new(){InspectionId=selectedInspection.Text("inspection")},1,null,token)).Rows.Single();
             var detail=await snapshot.DetailAsync(_profile,inspection.Key(_profile.Identity,BrowseLevel.Inspections),token);
-            var geometry=await _repository.GeometryAsync(_profile,inspection.Text("model_name"),inspection.Text("layer_name"),ct);
             var rows=new List<ResultRow>();long total=0;
             await snapshot.StreamInspectionAsync(_profile,inspection.Database,inspection.Text("inspection"),async(count,source,readToken)=>
             {total=count;await foreach(var row in source.WithCancellation(readToken)){rows.Add(row);if(rows.Count==2000)break;}},token);
@@ -515,7 +516,7 @@ public partial class MainWindow : Window
             },ct);
         });
     }
-    private void Window_Closing(object? sender,System.ComponentModel.CancelEventArgs e){_refreshTimer.Stop();_queryCts?.Cancel();_detailCts?.Cancel();SaveView();if(_repository is IDisposable disposable)disposable.Dispose();}
+    private void Window_Closing(object? sender,System.ComponentModel.CancelEventArgs e){InputManager.Current.PreProcessInput-=AppInput;_refreshTimer.Stop();_queryCts?.Cancel();_detailCts?.Cancel();SaveView();if(_repository is IDisposable disposable)disposable.Dispose();}
 }
 
 internal sealed class DisplayConverter : System.Windows.Data.IValueConverter

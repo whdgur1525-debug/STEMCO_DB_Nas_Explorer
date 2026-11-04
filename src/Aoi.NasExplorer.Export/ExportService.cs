@@ -8,6 +8,7 @@ namespace Aoi.NasExplorer.Export;
 
 public static class ExportService
 {
+    public static bool IsRecordedPunch(ResultRow row)=>row["d_attr"] is double[] {Length:>=2} attrs&&attrs[0]==9999&&attrs[1]==10&&row.Number("raw_x")==512&&row.Number("raw_y")==512&&row.Number("cad_x")==512&&row.Number("cad_y")==512;
     public static string CsvCell(object? value)
     {
         string s=ResultRow.ValueText(value);
@@ -106,8 +107,7 @@ public static class ErtExporter
                 if(nx>0&&ny>0){ax=(ux-1)%nx+1; ay=(uy-1)%ny+1;}
                 if(block<=0){block=1;notes.Add("모델 범위 밖 행: 기존 다운로드 규약의 바 인덱스 0을 사용했습니다. 원본 좌표는 그대로입니다.");}
             }
-            var attrs=d["d_attr"] as double[];
-            bool punch=attrs is {Length:>=2}&&attrs[0]==9999&&attrs[1]==10&&Num("raw_x")==512&&Num("raw_y")==512;
+            bool punch=ExportService.IsRecordedPunch(d);
             int code=(int)Num("vms_code"),state=(int)Num("vms_state");
             string mark=state==1?"B":state==2?"P":"V";
             if(state==0&&d.Long("defect_type") is 19 or 20)mark="B";

@@ -57,7 +57,7 @@ public partial class MainWindow
     }
     private void SetVisibleChecks(bool selected)
     {
-        if(_queryCts is not null)return;
+        if(_idleLocked||_queryCts is not null)return;
         _changingChecks=true;
         try{foreach(DataRow row in _table.Rows)row["__checked"]=selected;}
         finally{_changingChecks=false;UpdateCheckedLabel();UpdateActions();}
@@ -102,11 +102,11 @@ public partial class MainWindow
     private string? CurrentPanelId()=>_filter.InspectionId.Length>0?_filter.InspectionId:Selected()?.Text("inspection") is string id&&id.Length>0?id:null;
     private async void Bundle_Click(object sender,RoutedEventArgs e)
     {
-        if(_queryCts is not null)return;
+        if(_idleLocked||_queryCts is not null)return;
         string? panelId=_level==BrowseLevel.Defects?CurrentPanelId():null;
         int checkedPanels=_checkedRecords.Values.Select(x=>(x.Database,Id:x.Text("inspection"))).Where(x=>x.Id.Length>0).Distinct().Count();
-        var dialog=new BundleWindow(_checkedRecords.Count,_level,panelId,SummaryLabel.Text,checkedPanels){Owner=this};
-        if(dialog.ShowDialog()!=true)return;
+        var dialog=new BundleWindow(_checkedRecords.Count,_level,panelId,SummaryLabel.Text,checkedPanels,sender is MenuItem{Tag:"panel"}){Owner=this};
+        if(ShowModal(()=>dialog.ShowDialog())!=true)return;
         List<BundleScope> scopes;
         try{scopes=CreateBundleScopes(dialog.Mode,panelId);}
         catch(Exception ex){Notice.Text="내보내기 범위 확인 실패: "+ex.Message;return;}
@@ -130,8 +130,8 @@ public partial class MainWindow
         try
         {
             var result=await InspectionBundleExporter.ExportAsync(_repository,_profile,root,scopes,options,SaveHandlerImageAsync,text=>Status.Text=text,ct);
-            string state=result.Status switch{"completed"=>"완료","partial_failure"=>"일부 실패","empty"=>"해당 패널 없음",_=>result.Status};
-            SetOutput(root,$"내보내기 {state} · 패널 {result.Panels:N0}개 / 불량 {result.Defects:N0}건 / ERT {result.ErtFiles:N0}개 / 이미지 {result.Images:N0}개 / 이미지 미기록 {result.MissingImages:N0}건 / 실패 {result.Failures:N0}건",true);
+            string state=result.Status switch{"completed"=>"완료","completed_with_limitations"=>"완료 · 복원 제한 있음","partial_failure"=>"일부 실패","empty"=>"해당 패널 없음",_=>result.Status};
+            SetOutput(root,$"내보내기 {state} · 패널 {result.Panels:N0}개 / 불량 {result.Defects:N0}건 / ERT {result.ErtFiles:N0}개 / 이미지 {result.Images:N0}개 / 이미지 미기록 {result.MissingImages:N0}건 / 보조 파일 {result.SidecarFiles:N0}개 / 복원 제한 {result.Unrecoverable:N0}항목 / 실패 {result.Failures:N0}건 · 사유는 처리내역",true);
         }
         catch{_lastOutput=root;throw;}
     }

@@ -27,6 +27,7 @@ public partial class MainWindow
     private readonly List<object> _exportSnapshots=[];
     private DateTimeOffset? _lastRefresh;
     private DateTimeOffset? _lastRefreshAttempt;
+    private DateTimeOffset _lastDiscoveryAt=DateTimeOffset.Now;
     private string? _lastOutput;
     private bool _experienceReady;
     private bool _detailLoading;
@@ -35,7 +36,9 @@ public partial class MainWindow
     private void InitializeExperience()
     {
         _experienceReady=true;
-        AutoRefreshBox.SelectedIndex=_view.RefreshSeconds switch{30=>1,60=>2,300=>3,_=>0};
+        AutoRefreshBox.SelectedIndex=_view.RefreshSeconds switch{>0 and <300=>1,>=300=>2,_=>0};
+        if(_view.RefreshSeconds>0)_view.RefreshSeconds=Math.Max(60,_view.RefreshSeconds);
+        InitializeIdleSession();ScheduleAutoRefresh();
         _refreshTimer.Interval=TimeSpan.FromSeconds(1);
         _refreshTimer.Tick+=async(_,_)=>await AutoRefreshTickAsync();
         _refreshTimer.Start();
@@ -62,7 +65,7 @@ public partial class MainWindow
     private async void Filter_Click(object sender,RoutedEventArgs e)=>await RunAsync(ct=>BeginQueryAsync(ReadFilter(),_level,SelectedDatabases(),ct,allDatabases:ScopeBox.SelectedItem is Scope{Database:null}));
     private async Task OpenSelectedAsync(BrowseLevel target)
     {
-        if(_queryCts is not null||Selected() is not ResultRow row)return;
+        if(_idleLocked||_queryCts is not null||Selected() is not ResultRow row)return;
         var child=Child(row,_level,_filter);
         await RunAsync(ct=>BeginQueryAsync(child.Filter,target,new[]{row.Database},ct));
     }
@@ -80,7 +83,7 @@ public partial class MainWindow
     }
     private async Task NavigateHistoryAsync(bool forward)
     {
-        if(_queryCts is not null)return;
+        if(_idleLocked||_queryCts is not null)return;
         var from=forward?_forward:_history;var to=forward?_history:_forward;
         if(!from.TryPop(out var state))return;
         to.Push(CaptureNavigation());
@@ -90,7 +93,7 @@ public partial class MainWindow
     private async void Refresh_Click(object sender,RoutedEventArgs e)=>await RefreshCurrentAsync();
     private async Task RefreshCurrentAsync(bool rediscover=true)
     {
-        if(_queryCts is not null||_queryDatabases.Count==0)return;
+        if(_idleLocked&&!_resuming||_queryCts is not null||_queryDatabases.Count==0)return;
         var selection=Selected()?.Key(_profile.Identity,_level);var state=CaptureNavigation();
         ClearImages();_ertAvailability.Clear();
         await RunAsync(async ct=>
@@ -98,6 +101,7 @@ public partial class MainWindow
             var databases=state.Current.Databases;
             if(rediscover)
             {
+                _lastDiscoveryAt=DateTimeOffset.Now;
                 bool all=state.Current.AllDatabases;
                 if(_repository is ExplorerRepository repo)repo.ClearSchemaCache();
                 _databases=(await _repository.DiscoverAsync(_profile,ct)).ToList();ConfigureNavigation();
@@ -116,22 +120,23 @@ public partial class MainWindow
     private void AutoRefresh_Changed(object sender,SelectionChangedEventArgs e)
     {
         if(!_experienceReady)return;
-        _view.RefreshSeconds=AutoRefreshBox.SelectedIndex switch{1=>30,2=>60,3=>300,_=>0};
-        SaveView();UpdateRefreshLabel();
+        _view.RefreshSeconds=AutoRefreshBox.SelectedIndex switch{1=>60,2=>300,_=>0};
+        ScheduleAutoRefresh();SaveView();UpdateRefreshLabel();
     }
     private async Task AutoRefreshTickAsync(bool? activeOverride=null)
     {
+        if(await EnterIdleIfDueAsync())return;
         UpdateRefreshLabel();
-        if(_view.RefreshSeconds<=0||_queryCts is not null||!(activeOverride??IsActive)||_lastRefreshAttempt is null||_queryDatabases.Count==0)return;
+        if(_view.RefreshSeconds<=0||_queryCts is not null||!(activeOverride??IsActive)||_nextAutoRefreshAt is null||_queryDatabases.Count==0)return;
         // Do not overwrite an in-progress edit in search/filters or cancel a selected image load.
         if(Keyboard.FocusedElement is TextBox||_detailLoading||_checkedRecords.Count>0)return;
         try{if(ReadFilter()!=_filter||!SelectedDatabases().SequenceEqual(_queryDatabases))return;}catch(ArgumentException){return;}
-        if((DateTimeOffset.Now-_lastRefreshAttempt.Value).TotalSeconds>=_view.RefreshSeconds)await RefreshCurrentAsync(false);
+        if(DateTimeOffset.Now>=_nextAutoRefreshAt.Value)await RefreshCurrentAsync(_allDatabases&&DateTimeOffset.Now-_lastDiscoveryAt>=TimeSpan.FromMinutes(5));
     }
     private void UpdateRefreshLabel()
     {
         if(!_experienceReady)return;
-        RefreshLabel.Text=(_lastRefresh.HasValue?$"최근 조회 {_lastRefresh:HH:mm:ss}":"아직 조회하지 않음")+(_exporting?" · 내보내기 중 갱신 일시정지":_view.RefreshSeconds>0?$" · {_view.RefreshSeconds}초 주기 (이 창 사용 중)":" · 수동 갱신 (F5)");
+        RefreshLabel.Text=(_lastRefresh.HasValue?$"최근 조회 {_lastRefresh:HH:mm:ss}":"아직 조회하지 않음")+(_exporting?" · 내보내기 중 갱신 일시정지":_view.RefreshSeconds>0?$" · {_view.RefreshSeconds/60}분+분산 대기 · 10분 미사용 시 중지":" · 수동 갱신 (F5)");
     }
     private async void Databases_Click(object sender,RoutedEventArgs e)
     {
@@ -267,7 +272,7 @@ public partial class MainWindow
     private async void SummaryCsv_Click(object sender,RoutedEventArgs e)
     {
         var dialog=new SaveFileDialog{Filter="CSV 파일|*.csv",FileName=$"패널집계_{DateTime.Now:yyyyMMdd_HHmmss}.csv"};
-        if(dialog.ShowDialog(this)!=true)return;
+        if(ShowModal(()=>dialog.ShowDialog(this))!=true)return;
         var rows=(SummaryTabs.SelectedIndex==1?_lotSummaryRows:_summaryRows).ToArray();
         await RunAsync(async ct=>{PrepareOutput(dialog.FileName);await ExportService.CsvAsync(dialog.FileName,ExportService.Enumerate(rows),ct);SetOutput(dialog.FileName,$"패널 집계 저장 완료 · {rows.Length:N0}그룹");},true);
     }
