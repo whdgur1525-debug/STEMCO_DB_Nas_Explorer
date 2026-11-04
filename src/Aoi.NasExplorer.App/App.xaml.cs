@@ -28,6 +28,8 @@ public partial class App : Application
             var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(e.Args[1]))!);using(var file=File.Create(e.Args[1]))encoder.Save(file);
             window.Close();Shutdown();return;
         }
-        window.Show();if(e.Args.Contains("--demo"))await window.ShowDemoAsync();
+        window.Show();
+        if(e.Args.Contains("--local"))await window.ConnectLocalProfileAsync();
+        else if(e.Args.Contains("--demo"))await window.ShowDemoAsync();
     }
 }

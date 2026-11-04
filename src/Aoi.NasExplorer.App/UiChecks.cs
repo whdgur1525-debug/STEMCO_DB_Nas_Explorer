@@ -58,6 +58,12 @@ public partial class MainWindow
         async Task Until(Func<bool> condition)
         {var start=DateTime.UtcNow;while(!condition()){if((DateTime.UtcNow-start).TotalSeconds>5)throw new TimeoutException("UI state did not settle");await Task.Delay(10);}}
         await Check("demo LOTs and DB scope",async()=>{await ShowDemoAsync();Assert(_rows.Count==12&&_queryDatabases.Single()=="예제_DB");Assert(ConnectionLabel.Text.Contains("예제"));});
+        await Check("local start never connects a remote saved host",async()=>
+        {
+            var prior=_profile;_profile=prior with{Host="remote.invalid"};
+            try{await ConnectLocalProfileAsync();Assert(Notice.Text.Contains("이 PC의 DB"));Assert(_demo);}
+            finally{_profile=prior;}
+        });
         await Check("folder search keeps the displayed model LOT and exact inspection",async()=>
         {
             var context=new SearchFilter{Model="PI-DEMO-01",Lot="LOT-20261104-001",Layer="L1",LotId="1",LayerId="1",InspectionId="1"};

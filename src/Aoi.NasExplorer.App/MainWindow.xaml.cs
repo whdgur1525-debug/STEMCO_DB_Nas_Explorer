@@ -78,15 +78,27 @@ public partial class MainWindow : Window
         if(_exporting)return;
         var dialog=new ConnectionWindow(_profile){Owner=this};if(dialog.ShowDialog()!=true||dialog.Profile is null)return;
         var next=dialog.Profile;
+        await ConnectProfileAsync(next,dialog.Remember);
+    }
+    internal async Task ConnectLocalProfileAsync()
+    {
+        if(_profile.Host is not ("127.0.0.1" or "localhost" or "::1"))
+        {Notice.Text="로컬 시작은 이 PC의 DB에만 연결합니다. NAS 연결 버튼에서 접속정보를 확인하세요.";return;}
+        await ConnectProfileAsync(_profile,true);
+    }
+    private async Task ConnectProfileAsync(ConnectionProfile next,bool remember)
+    {
         await RunAsync(async ct=>
         {
             var repo=new ExplorerRepository();var found=await repo.DiscoverAsync(next,ct);ct.ThrowIfCancellationRequested();
             _detailCts?.Cancel();if(_repository is IDisposable previousRepository)previousRepository.Dispose();
             _repository=repo;_profile=next;_demo=false;_databases=found.ToList();_history.Clear();ClearImages();LoadFavorites();
             ConnectionLabel.Text=$"{next.Name} · {next.Host}:{next.Port} · 읽기 전용";
-            ProfileStore.Save(next,dialog.Remember);ConfigureNavigation();
+            if(!_smoke)ProfileStore.Save(next,remember);ConfigureNavigation();
             Log($"연결 완료 · 검사 DB {found.Count(x=>x.IsInspection)}개 / 확인 대상 {found.Count}개");
             foreach(var db in found.Where(x=>x.Error is not null))Log($"{db.Name}: {db.Error}");
+            if(next.Host is "127.0.0.1" or "localhost" or "::1")
+                if(ScopeBox.ItemsSource is IEnumerable<Scope> scopes&&scopes.FirstOrDefault(x=>x.Database==next.ManagementDatabase) is Scope localScope)ScopeBox.SelectedItem=localScope;
             await BeginQueryAsync(ReadFilter(),(BrowseLevel)LevelBox.SelectedIndex,SelectedDatabases(),ct,false);
         });
     }

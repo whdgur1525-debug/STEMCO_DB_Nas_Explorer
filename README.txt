@@ -1,4 +1,4 @@
-Synapse NAS Explorer 0.1.1
+Synapse NAS Explorer 0.1.2
 
 NAS PostgreSQL에 저장된 검사 결과를 읽기 전용으로 탐색하는 별도 Windows x64 프로그램입니다.
 Handler, Vision, VMS, DataTransfer의 설치 파일을 교체하지 않습니다.
@@ -19,6 +19,8 @@ HALCON, 장비 모션, MES, 다모테크 전송 및 PostgreSQL 복제 기능이 
 예제 보기
 실제 NAS 연결 없이 화면 조작을 살펴볼 수 있습니다. 상단과 목록에 예제임을 표시합니다.
 EXE의 --demo 옵션도 같은 기능입니다.
+--local 옵션은 마지막 저장 설정의 호스트가 127.0.0.1/localhost/::1인 경우에만 자동 연결합니다.
+원격 NAS 설정이 저장돼 있으면 자동 접속하지 않고 연결 설정 확인을 안내합니다.
 
 데이터의 의미
 - DB 이름과 원본 PK를 함께 유지합니다. 다른 DB의 같은 숫자 ID를 같은 결과로 합치지 않습니다.
