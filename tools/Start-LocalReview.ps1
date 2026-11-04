@@ -1,6 +1,6 @@
-param(
+﻿param(
     [string]$WorkDir='C:\Users\msi\Documents\Codex\2026-11-04\c\work\isolated-small',
-    [string]$Executable='C:\Users\msi\Documents\Codex\2026-11-04\c\outputs\AOI-NasExplorer_0.1.1\AOI-NasExplorer.exe',
+    [string]$Executable='C:\Users\msi\Documents\Codex\2026-11-04\c\outputs\AOI-NasExplorer_0.2.0\AOI-NasExplorer.exe',
     [string]$PgBin='C:\Program Files\PostgreSQL\18\bin'
 )
 $ErrorActionPreference='Stop'

@@ -50,6 +50,7 @@ internal sealed record ViewPreferences
     public double Height {get;set;}=940;
     public Dictionary<string,double> ColumnWidths {get;set;}=new();
     public List<SavedFavorite> Favorites {get;set;}=[];
+    public int RefreshSeconds {get;set;}
 }
 
 internal static class BitmapDecoderService
@@ -77,6 +78,19 @@ internal static class BitmapDecoderService
 
 internal sealed class DemoRepository : IExplorerRepository
 {
+    public Task WithSnapshotAsync(ConnectionProfile p,string db,Func<IExplorerRepository,DateTimeOffset,CancellationToken,Task> consume,CancellationToken ct)=>consume(this,DateTimeOffset.Now,ct);
+    public async IAsyncEnumerable<ResultRow> StreamAsync(ConnectionProfile p,string db,BrowseLevel level,SearchFilter filter,bool images,Action<DateTimeOffset>? captured,[System.Runtime.CompilerServices.EnumeratorCancellation]CancellationToken ct,IReadOnlySet<string>? selectedIds=null)
+    {
+        captured?.Invoke(DateTimeOffset.Now);
+        foreach(var row in (await QueryAsync(p,db,level,filter,250,null,ct)).Rows)
+        {if(selectedIds is not null&&!selectedIds.Contains(row.Key(p.Identity,level).Id))continue;if(images)row.SnapshotImage=await ImageAsync(p,row.Key(p.Identity,level),ct);yield return row;}
+    }
+    public async Task<ScopeSummary> SummaryAsync(ConnectionProfile p,string db,SearchFilter f,CancellationToken ct)
+    {
+        var rows=(await QueryAsync(p,db,BrowseLevel.Defects,f,250,null,ct)).Rows;
+        var groups=rows.GroupBy(x=>x.Text("panel_no")).Select(g=>new ResultRow{Database=db,Values=new(g.First().Values){["inspection_count"]=g.Select(x=>x.Text("inspection")).Distinct().LongCount(),["defect_count"]=g.LongCount(),["image_count"]=g.LongCount(),["vms_ng_count"]=g.LongCount(x=>x.Long("vms_state")==1),["vms_pass_count"]=g.LongCount(x=>x.Long("vms_state")==2)}}).ToArray();
+        return new((await QueryAsync(p,db,BrowseLevel.Lots,f,250,null,ct)).Rows.Count,(await QueryAsync(p,db,BrowseLevel.Inspections,f,250,null,ct)).Rows.Count,rows.Count,groups.Length,groups);
+    }
     public Task<IReadOnlyList<DatabaseInfo>> DiscoverAsync(ConnectionProfile p,CancellationToken ct)=>Task.FromResult<IReadOnlyList<DatabaseInfo>>(new[]{new DatabaseInfo("예제_DB","예제",true)});
     public Task<QueryPage> QueryAsync(ConnectionProfile p,string db,BrowseLevel level,SearchFilter f,int size,string? cursor,CancellationToken ct)
     {
@@ -91,11 +105,12 @@ internal sealed class DemoRepository : IExplorerRepository
             if(level==BrowseLevel.Layers) v=new(){["layer"]=i,["model_name"]="PI-DEMO-01",["lot_id_name"]="LOT-20261104-001",["layer_name"]=$"L{i}",["vms_status"]="VMS_COMPLETED",["retest_count"]=0};
             if(level==BrowseLevel.Inspections) v=new(){["inspection"]=i,["model_name"]="PI-DEMO-01",["lot_id_name"]="LOT-20261104-001",["layer_name"]="L1",["machine_id"]="EQ09",["pc_no"]=(i-1)%3+1,["panel_no"]=(i-1)/3+1,["inspection_time"]=new DateTime(2026,11,4,9,15,0).AddSeconds(i),["inspection_status"]="VMS_COMPLETED",["handler_tact_sec"]=18.4+i/10.0,["tact_ms"]=13500};
             if(f.Model.Length>0)v["model_name"]=f.Model;if(f.Lot.Length>0)v["lot_id_name"]=f.Lot;if(f.Layer.Length>0)v["layer_name"]=f.Layer;
-            if(f.Text.Length>0&&!string.Join(" ",v.Values).Contains(f.Text,StringComparison.OrdinalIgnoreCase))continue;
+            if(f.Text.Length>0&&!(f.Target switch{SearchTarget.Lot=>ResultRow.ValueText(v.GetValueOrDefault("lot_id_name")),SearchTarget.Model=>ResultRow.ValueText(v.GetValueOrDefault("model_name")),_=>ResultRow.ValueText(v.GetValueOrDefault("lot_id_name"))+" "+ResultRow.ValueText(v.GetValueOrDefault("model_name"))}).Contains(f.Text,StringComparison.OrdinalIgnoreCase))continue;
             if(f.Panel.HasValue&&Convert.ToInt32(v.GetValueOrDefault("panel_no",-1))!=f.Panel)continue;
+            if(f.InspectionId.Length>0&&ResultRow.ValueText(v.GetValueOrDefault("inspection"))!=f.InspectionId)continue;
             rows.Add(new(){Database=db,Values=v});
         }
-        return Task.FromResult(new QueryPage(rows,false,null));
+        return Task.FromResult(new QueryPage(rows.Take(size).ToArray(),false,null));
     }
     private static ResultRow Row(string db,int i)=>new(){Database=db,Values=new()
     {

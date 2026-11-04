@@ -129,6 +129,48 @@ CREATE TABLE aoi_punch(model_id bigint,punch_apply boolean,punch_units integer[]
         await Check("discovery finds archived and active DB without writes",async()=>{var dbs=await repo.DiscoverAsync(p,default);True(dbs.Any(x=>x.Name==db1&&x.State=="ARCHIVE"&&x.IsInspection));True(dbs.Any(x=>x.Name==db2&&x.State=="ACTIVE"&&x.IsInspection));True(dbs.Any(x=>x.Name=="aoi_model"&&!x.IsInspection));});
         await Check("models are distinct and pageable",async()=>{var first=await Q(BrowseLevel.Models,count:1);True(first.HasMore);Equal("MODEL_A",first.Rows[0].Text("model_name"));Equal("MODEL_B",(await Q(BrowseLevel.Models,count:1,cursor:first.Cursor)).Rows[0].Text("model_name"));});
         await Check("lots without inspections retained",async()=>Equal(4,(await Q(BrowseLevel.Lots)).Rows.Count));
+        await Check("LOT and model searches have explicit distinct targets",async()=>
+        {
+            Equal(0,(await Q(BrowseLevel.Lots,new(){Text="MODEL_A",Target=SearchTarget.Lot})).Rows.Count);
+            Equal(3,(await Q(BrowseLevel.Lots,new(){Text="MODEL_A",Target=SearchTarget.Model})).Rows.Count);
+            Equal(1,(await Q(BrowseLevel.Lots,new(){Text="LOT_A",Target=SearchTarget.Lot})).Rows.Count);
+        });
+        await Check("whole scope counts and panel groups include PCs and retests exactly once",async()=>
+        {
+            var summary=await repo.SummaryAsync(p,db1,new(),default);
+            Equal(4L,summary.Lots);Equal(5L,summary.Inspections);Equal(5L,summary.Defects);Equal(3L,summary.PanelGroups);
+            var panel=summary.Panels.Single(x=>x.Text("model_name")=="MODEL_A"&&x.Text("machine_id")=="EQ09");
+            Equal(3L,panel.Long("inspection_count"));Equal(3L,panel.Long("defect_count"));Equal(2L,panel.Long("image_count"));
+            Equal(1L,panel.Long("vms_ng_count"));Equal(1L,panel.Long("vms_pass_count"));
+        });
+        await Check("panel summary obeys cause and VMS filters",async()=>
+        {
+            var summary=await repo.SummaryAsync(p,db1,new(){CauseCode=4001,VmsState=1},default);
+            Equal(1L,summary.Defects);Equal(1L,summary.Inspections);Equal(1L,summary.Panels.Single().Long("defect_count"));
+        });
+        await Check("LOT counts retain empty LOTs and physical identities",async()=>
+        {
+            var summary=await repo.SummaryAsync(p,db1,new(),default);
+            Equal(4,summary.LotCounts.Count);Equal(0L,summary.LotCounts.Single(x=>x.Text("lot_id_name")=="NO_INSPECTION").Long("defect_count"));
+            Equal(4L,summary.LotCounts.Single(x=>x.Text("lot_id_name")=="LOT_A").Long("defect_count"));
+            Equal(4,summary.LotCounts.Select(x=>x.Text("lot_id")).Distinct().Count());
+            Equal("1",summary.Panels.Single(x=>x.Text("model_name")=="MODEL_A"&&x.Text("machine_id")=="EQ09").Text("lot_id"));
+        });
+        await Check("exact group machine does not broaden EQ0 to EQ09 and EQ10",async()=>
+        {
+            Equal(4,(await Q(BrowseLevel.Inspections,new(){Machine="EQ0"})).Rows.Count);
+            Equal(0,(await Q(BrowseLevel.Inspections,new(){Machine="EQ0",MachineExact=true})).Rows.Count);
+        });
+        await Check("zero-defect panels remain in summary",async()=>
+        {
+            try
+            {
+                await Admin(p,db1,"INSERT INTO inspection(inspection,layer,machine_id,pc_no,panel_no,time,status) VALUES(888,1,'EQ09',1,9,now(),'COMPLETED')");
+                var summary=await repo.SummaryAsync(p,db1,new(){Model="MODEL_A"},default);
+                Equal(0L,summary.Panels.Single(x=>x.Long("panel_no")==9).Long("defect_count"));Equal(5L,summary.Inspections);
+            }
+            finally{await Admin(p,db1,"DELETE FROM inspection WHERE inspection=888");}
+        });
         await Check("literal wildcard search does not broaden",async()=>Equal(1,(await Q(BrowseLevel.Lots,new(){Text="_%"})).Rows.Count));
         await Check("SQL injection remains a search string",async()=>Equal(0,(await Q(BrowseLevel.Lots,new(){Text="'; DROP TABLE defects; --"})).Rows.Count));
         await Check("model prevents same layer name mixing",async()=>Equal(1,(await Q(BrowseLevel.Layers,new(){Model="MODEL_A"})).Rows.Count));
@@ -166,6 +208,51 @@ CREATE TABLE defects(defects uuid PRIMARY KEY,inspection uuid,unit_idx int,unit_
 """);
         await Admin(p,"aoi_uuid","INSERT INTO lot_id VALUES('00000000-0000-0000-0000-000000000001','UUID_LOT','UUID_MODEL',now(),'ACTIVE');");
         await Check("UUID primary key lookup supported",async()=>{var first=await Q(BrowseLevel.Lots,db:"aoi_uuid");var detail=await repo.DetailAsync(p,first.Rows[0].Key(p.Identity,BrowseLevel.Lots),default);Equal("UUID_LOT",detail.Text("lot_id_name"));});
+        await Check("legacy and empty UUID summaries stay valid",async()=>
+        {Equal(5L,(await repo.SummaryAsync(p,"aoi_legacy",new(),default)).Defects);Equal(0L,(await repo.SummaryAsync(p,"aoi_uuid",new(),default)).Defects);});
+        await Check("export snapshot pins metadata image and count across concurrent updates",async()=>
+        {
+            try
+            {
+                await repo.WithSnapshotAsync(p,db1,async(snapshot,captured,ct)=>
+                {
+                    True(captured<=DateTimeOffset.UtcNow.AddSeconds(2));
+                    await Admin(p,db1,"UPDATE defects SET image=decode('aabbccdd','hex'),vms_state=2 WHERE defects=1;INSERT INTO defects(defects,inspection,unit_idx) VALUES(999,2,999)");
+                    var rows=(await snapshot.QueryAsync(p,db1,BrowseLevel.Defects,new(),250,null,ct)).Rows;
+                    Equal(5,rows.Count);Equal(0L,rows.Single(x=>x.Long("defects")==1).Long("vms_state"));
+                    Equal((byte)0,(await snapshot.ImageAsync(p,new(p.Identity,db1,"defects","1"),ct))!.Bytes[0]);
+                    Equal(5L,(await snapshot.SummaryAsync(p,db1,new(),ct)).Defects);
+                },default);
+                Equal(6,(await Q(BrowseLevel.Defects)).Rows.Count);
+            }
+            finally{await Admin(p,db1,"DELETE FROM defects WHERE defects=999;UPDATE defects SET image=decode('00010203','hex'),vms_state=0 WHERE defects=1");}
+        });
+        await Check("streaming snapshot keeps late image bytes and excludes new rows",async()=>
+        {
+            try
+            {
+                int count=0;DateTimeOffset? captured=null;
+                await foreach(var row in repo.StreamAsync(p,db1,BrowseLevel.Defects,new(),true,t=>captured=t,default))
+                {
+                    if(++count==1)await Admin(p,db1,"UPDATE defects SET image=decode('aabbccdd','hex') WHERE defects=1;INSERT INTO defects(defects,inspection,unit_idx) VALUES(999,2,999)");
+                    if(row.Long("defects")==1)Equal((byte)0,row.SnapshotImage!.Bytes[0]);
+                }
+                Equal(5,count);True(captured.HasValue);
+            }
+            finally{await Admin(p,db1,"DELETE FROM defects WHERE defects=999;UPDATE defects SET image=decode('00010203','hex') WHERE defects=1");}
+        });
+        await Check("cancelled streaming releases snapshot and permits subsequent query",async()=>
+        {
+            using var cts=new CancellationTokenSource();
+            try{await foreach(var row in repo.StreamAsync(p,db1,BrowseLevel.Defects,new(),false,null,cts.Token)){cts.Cancel();}throw new Exception("Expected cancellation");}catch(OperationCanceledException){}
+            Equal(5,(await Q(BrowseLevel.Defects)).Rows.Count);
+        });
+        await Check("selected-image streaming exports exact selected keys",async()=>
+        {
+            var ids=new List<string>();await foreach(var row in repo.StreamAsync(p,db1,BrowseLevel.Defects,new(),true,null,default,new HashSet<string>{"1","3"})){ids.Add(row.Text("defects"));True(row.SnapshotImage is not null);}
+            Equal("3,1",string.Join(",",ids));
+            try{await foreach(var row in repo.StreamAsync(p,db1,BrowseLevel.Defects,new(),true,null,default,new HashSet<string>{"999"})){}throw new Exception("Expected missing selection error");}catch(InvalidDataException){}
+        });
         await Check("ERT snapshot count and rows stay consistent during concurrent insert",async()=>
         {
             try
@@ -235,6 +322,15 @@ CREATE TABLE defects(defects uuid PRIMARY KEY,inspection uuid,unit_idx int,unit_
             {await using var cmd=new NpgsqlCommand("SELECT (SELECT count(*) FROM pg_subscription WHERE subdbid=(SELECT oid FROM pg_database WHERE datname=current_database()))+(SELECT count(*) FROM pg_publication)",c);Equal(0L,Convert.ToInt64(await cmd.ExecuteScalarAsync()));});
         }
         var metrics=new List<object>();
+        await Check("recovered LOT and panel summary matches independent SQL totals",async()=>
+        {
+            var summary=await repo.SummaryAsync(p,db,new(),default);
+            Equal(baseline["lot_id"],summary.Lots);Equal(baseline["inspection"],summary.Inspections);Equal(baseline["defects"],summary.Defects);
+            Equal(summary.Defects,summary.Panels.Sum(x=>x.Long("defect_count")??0));
+            var lot=await repo.SummaryAsync(p,db,new(){Text="agsd",Target=SearchTarget.Lot},default);
+            Equal(1L,lot.Lots);Equal(17L,lot.Inspections);Equal(82836L,lot.Defects);
+            await File.WriteAllTextAsync(Path.Combine(output,"recovered-panel-counts.json"),JsonSerializer.Serialize(new{summary.Lots,summary.Inspections,summary.Defects,summary.PanelGroups,panels=summary.Panels,agsd=new{lot.Inspections,lot.Defects}},new JsonSerializerOptions{WriteIndented=true}));
+        });
         foreach(var pair in new[]{(BrowseLevel.Lots,"lot_id"),(BrowseLevel.Layers,"layer"),(BrowseLevel.Inspections,"inspection"),(BrowseLevel.Defects,"defects")})
         {
             await Check("recovered exact row count: "+pair.Item2,async()=>
@@ -260,7 +356,7 @@ CREATE TABLE defects(defects uuid PRIMARY KEY,inspection uuid,unit_idx int,unit_
         });
         await Check("recovered full CSV count matches database",async()=>
         {
-            async IAsyncEnumerable<ResultRow> All(){string? cursor=null;do{var page=await repo.QueryAsync(p,db,BrowseLevel.Defects,new(),1000,cursor,default);foreach(var row in page.Rows)yield return row;cursor=page.Cursor;}while(cursor is not null);}
+            async IAsyncEnumerable<ResultRow> All(){await foreach(var row in repo.StreamAsync(p,db,BrowseLevel.Defects,new(),false,null,default))yield return row;}
             long count=await ExportService.CsvAsync(Path.Combine(output,"회수DB_불량전체.csv"),All(),default);Equal(baseline["defects"],count);
         });
         await File.WriteAllTextAsync(Path.Combine(output,"recovered-counts-and-timing.json"),JsonSerializer.Serialize(new{database=db,baseline,metrics,workingSet=Environment.WorkingSet},new JsonSerializerOptions{WriteIndented=true}));

@@ -15,7 +15,7 @@ public partial class MainWindow
         var korea=DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(9));
         if(korea.Date==new DateTime(2026,11,4)&&korea.Hour<22)throw new InvalidOperationException("대량 UI 시험은 22시 이후에만 실행합니다.");
         if(!int.TryParse(Environment.GetEnvironmentVariable("NAS_TEST_PORT"),out int port)||port is <55000 or >55999)throw new InvalidDataException("격리 포트 오류");
-        _profile=new(){Host="127.0.0.1",Port=port,Username="nas_test",Password=File.ReadAllText(Environment.GetEnvironmentVariable("NAS_TEST_PASSWORD_FILE")??throw new InvalidDataException("시험 비밀번호 파일 없음")).TrimEnd(),SslMode="Disable"};
+        _profile=new(){Host="127.0.0.1",Port=port,Username=Environment.GetEnvironmentVariable("NAS_RECOVERED_USER")??"nas_test",Password=File.ReadAllText(Environment.GetEnvironmentVariable("NAS_TEST_PASSWORD_FILE")??throw new InvalidDataException("시험 비밀번호 파일 없음")).TrimEnd(),SslMode="Disable"};
         _repository=new Aoi.NasExplorer.Data.ExplorerRepository();_demo=false;_databases=[new("aoi_20990102","합성 100만 행",true)];ConfigureNavigation();
         var clock=System.Diagnostics.Stopwatch.StartNew();long peak=0;int maxRows=0;Directory.CreateDirectory(folder);
         await BeginQueryAsync(new(),BrowseLevel.Defects,new[]{"aoi_20990102"},default);
@@ -36,14 +36,37 @@ public partial class MainWindow
         if(!database.StartsWith("nas_recovered_",StringComparison.Ordinal))throw new InvalidDataException("격리 복원 DB만 시험할 수 있습니다.");
         if(!int.TryParse(Environment.GetEnvironmentVariable("NAS_TEST_PORT"),out int port)||port is <55000 or >55999)throw new InvalidDataException("격리 시험 포트 오류");
         _profile=new(){Host="127.0.0.1",Port=port,Username="nas_test",Password=File.ReadAllText(Environment.GetEnvironmentVariable("NAS_TEST_PASSWORD_FILE")??throw new InvalidDataException("시험 비밀번호 파일 없음")).TrimEnd(),SslMode="Disable"};
+        _profile=_profile with{Username=Environment.GetEnvironmentVariable("NAS_RECOVERED_USER")??"nas_test"};
         _repository=new Aoi.NasExplorer.Data.ExplorerRepository();_demo=false;_databases=[new(database,"격리 복원",true)];ConfigureNavigation();ConnectionLabel.Text="현장 회수 자료 · 로컬 격리 DB";
         Directory.CreateDirectory(folder);var checks=new List<object>();int failed=0;
         async Task Check(string name,Func<Task> test){try{await test();checks.Add(new{name,status="passed"});}catch(Exception ex){failed++;checks.Add(new{name,status="failed",error=ex.Message});}}
         await Check("actual LOT metadata displayed",async()=>{await BeginQueryAsync(new(),BrowseLevel.Lots,new[]{database},default);if(_rows.Count==0)throw new InvalidDataException("No LOT rows");});
+        await Check("actual all-scope count distinguishes visible rows and total defects",()=>{if(!SummaryLabel.Text.Contains("257,902")||_summaryRows.Sum(x=>x.Long("defect_count")??0)!=257902)throw new InvalidDataException(SummaryLabel.Text);return Task.CompletedTask;});
+        await Check("actual LOT search and direct defects agree with recovered counts",async()=>
+        {
+            SearchTargetBox.SelectedIndex=0;SearchText.Text="agsd";await SearchGlobalAsync();
+            if(_rows.Count!=1||!SummaryLabel.Text.Contains("82,836"))throw new InvalidDataException(SummaryLabel.Text);
+            Results.SelectedIndex=0;await OpenSelectedAsync(BrowseLevel.Defects);
+            if(_level!=BrowseLevel.Defects||_rows.Count!=250||!SummaryLabel.Text.Contains("82,836"))throw new InvalidDataException(SummaryLabel.Text);
+        });
         await Check("actual inspection history displayed",async()=>{await BeginQueryAsync(new(),BrowseLevel.Inspections,new[]{database},default);if(_rows.Count==0)throw new InvalidDataException("No inspections");});
+        await Check("ERT without actual model data is disabled with a reason",async()=>
+        {
+            Results.SelectedIndex=0;var start=DateTime.UtcNow;
+            while(!_ertAvailability.ContainsKey(Selected()!.Text("model_name"))){if((DateTime.UtcNow-start).TotalSeconds>10)throw new TimeoutException("Model availability timeout");await Task.Delay(10);}
+            if(ErtButton.IsEnabled||!Convert.ToString(ErtButton.ToolTip)!.Contains("모델 자료"))throw new InvalidDataException("ERT eligibility was not explained");
+        });
         await Check("actual defect metadata and stored fields displayed",async()=>{await BeginQueryAsync(new(){Images=ImageFilter.Present},BrowseLevel.Defects,new[]{database},default);if(_rows.Count==0)throw new InvalidDataException("No defect images");Results.SelectedIndex=0;var start=DateTime.UtcNow;while(Details.Items.Count==0){if((DateTime.UtcNow-start).TotalSeconds>10)throw new TimeoutException("Detail load timeout");await Task.Delay(10);}});
         await Check("actual image pixels decoded without HALCON",async()=>{var start=DateTime.UtcNow;while(DefectImage.Source is null){if((DateTime.UtcNow-start).TotalSeconds>10)throw new InvalidDataException(ImagePlaceholder.Text);await Task.Delay(10);}});
-        await Check("actual image export preserves source bytes",async()=>{var image=_image??throw new InvalidDataException("No image payload");string path=await SaveImageAsync(image,Path.Combine(folder,"image-sample"),default);var expected=ImageBytes.Normalize(image.Bytes,image.Width,image.Height,image.Channels);if(!(await File.ReadAllBytesAsync(path)).SequenceEqual(expected))throw new InvalidDataException("Byte mismatch");});
+        await Check("actual selected-image workflow preserves bytes and reports snapshot success",async()=>
+        {
+            var image=_image??throw new InvalidDataException("No image payload");var selected=SelectedRows();string output=Path.Combine(folder,"selected-image-flow");
+            await RunAsync(ct=>ExportImagesCoreAsync(output,SelectedImageRows(selected,ct),ct,true),true);
+            using var json=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(output,"결과.json")));
+            if(json.RootElement.GetProperty("saved").GetInt32()!=1||json.RootElement.GetProperty("snapshots").GetArrayLength()!=1)throw new InvalidDataException("Missing success report");
+            string path=Directory.GetFiles(output,"*.raw",SearchOption.AllDirectories).Single();var expected=ImageBytes.Normalize(image.Bytes,image.Width,image.Height,image.Channels);
+            if(!(await File.ReadAllBytesAsync(path)).SequenceEqual(expected))throw new InvalidDataException("Byte mismatch");
+        });
         await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.ApplicationIdle);UpdateLayout();
         var content=(System.Windows.FrameworkElement)Content;var capture=new RenderTargetBitmap((int)content.ActualWidth,(int)content.ActualHeight,96,96,PixelFormats.Pbgra32);capture.Render(content);var png=new PngBitmapEncoder();png.Frames.Add(BitmapFrame.Create(capture));using(var stream=File.Create(Path.Combine(folder,"회수DB_화면.png")))png.Save(stream);
         await File.WriteAllTextAsync(Path.Combine(folder,"recovered-ui-results.json"),JsonSerializer.Serialize(new{failed,checks},new JsonSerializerOptions{WriteIndented=true}));
@@ -112,11 +135,78 @@ public partial class MainWindow
         {var source=BitmapSource.Create(2,2,96,96,PixelFormats.Gray8,null,new byte[]{0,64,128,255},2);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(source));using var stream=new MemoryStream();encoder.Save(stream);var decoded=BitmapDecoderService.Decode(new(stream.ToArray(),0,0,1,"db","1"));Assert(decoded.PixelWidth==2&&decoded.PixelHeight==2);return Task.CompletedTask;});
         await Check("decoded cache obeys byte budget",async()=>
         {ClearImages();for(int i=0;i<40;i++)CachedBitmap(new(new byte[1024*1024],1024,1024,1,"db",i.ToString()));Assert(_cacheBytes<=32*1024*1024);Assert(_imageCache.Count<=32);await Task.CompletedTask;});
+        await Check("same-ID same-size image updates replace cached pixels",()=>
+        {
+            ClearImages();CachedBitmap(new(new byte[]{1,2,3,4},2,2,1,"db","same"));
+            var changed=CachedBitmap(new(new byte[]{5,6,7,8},2,2,1,"db","same"));byte[] pixels=new byte[4];changed.CopyPixels(pixels,2,0);Assert(pixels[0]==5);return Task.CompletedTask;
+        });
         await Check("exact inspection filter used for ERT data",()=>
         {var row=new ResultRow{Values=new(){["inspection"]=17}};var child=Child(row,BrowseLevel.Inspections,new(){LatestOnly=true});Assert(child.Filter.InspectionId=="17"&&!child.Filter.LatestOnly);return Task.CompletedTask;});
         await Check("CSV formula and original JSON differ intentionally",()=>{Assert(ExportService.CsvCell("=cmd").Contains("'=cmd"));Assert(ExportService.Json(new(){Values=new(){["text"]="=cmd"}}).Contains("=cmd"));return Task.CompletedTask;});
         await Check("tree lazy loads first model level",async()=>
         {ConfigureNavigation();var item=(TreeViewItem)Navigation.Items[0];item.Items.Clear();var node=(Nav)item.Tag;await PopulateNodeAsync(item,node,null,default);Assert(item.Items.Count==3);});
+        await Check("LOT search starts outside previous exact inspection context",async()=>
+        {
+            await BeginQueryAsync(new(){Model="PI-DEMO-01",Lot="LOT-20261104-001",Layer="L1",LotId="1",LayerId="1",InspectionId="1"},BrowseLevel.Defects,new[]{"예제_DB"},default);
+            SearchText.Text="LOT-20261104-002";SearchTargetBox.SelectedIndex=0;
+            await SearchGlobalAsync();Assert(_level==BrowseLevel.Lots&&_rows.Count==1);Assert(_filter.Target==SearchTarget.Lot&&_filter.InspectionId==""&&_filter.Model==""&&_filter.LotId=="");
+        });
+        await Check("back and forward restore filters and path without adding refresh history",async()=>
+        {
+            await ShowDemoAsync();await BeginQueryAsync(new(){Text="LOT-20261104-001",Target=SearchTarget.Lot},BrowseLevel.Lots,new[]{"예제_DB"},default);
+            var child=Child(_rows[0],_level,_filter);await BeginQueryAsync(child.Filter,child.Level,new[]{"예제_DB"},default);
+            Assert(_trail.Count==2);await NavigateHistoryAsync(false);Assert(_level==BrowseLevel.Lots&&_filter.Text=="LOT-20261104-001"&&ForwardButton.IsEnabled);
+            await NavigateHistoryAsync(true);Assert(_level==BrowseLevel.Layers&&_filter.LotId=="1"&&_trail.Count==2);
+            int history=_history.Count;await RefreshCurrentAsync();Assert(_history.Count==history&&_level==BrowseLevel.Layers);
+        });
+        await Check("direct defect shortcut bypasses intermediate folders and retains selected LOT",async()=>
+        {
+            await ShowDemoAsync();Results.SelectedIndex=0;await OpenSelectedAsync(BrowseLevel.Defects);
+            Assert(_level==BrowseLevel.Defects&&_filter.LotId=="1"&&_filter.InspectionId=="");
+            Assert(SummaryLabel.Text.Contains("72")&&_summaryRows.Count==6);
+        });
+        await Check("export eligibility explains folder and selection requirements",async()=>
+        {
+            await ShowDemoAsync();UpdateActions();Assert(CsvButton.IsEnabled&&!SelectedImagesButton.IsEnabled&&!ErtButton.IsEnabled&&!JsonButton.IsEnabled);
+            await BeginQueryAsync(new(),BrowseLevel.Defects,new[]{"예제_DB"},default);Results.SelectedIndex=0;await Until(()=>_image is not null);UpdateActions();
+            Assert(SelectedImagesButton.IsEnabled&&JsonButton.IsEnabled&&AllImagesButton.IsEnabled&&!ErtButton.IsEnabled);
+            await BeginQueryAsync(new(),BrowseLevel.Inspections,new[]{"예제_DB"},default);Results.SelectedIndex=0;await Until(()=>ErtButton.IsEnabled);Assert(ErtPreviewButton.IsEnabled&&!AllImagesButton.IsEnabled);
+        });
+        await Check("export pauses navigation and refresh then restores them",async()=>
+        {
+            _view.RefreshSeconds=30;var prior=_lastRefresh;bool executed=false;
+            await RunAsync(async ct=>
+            {
+                executed=true;Assert(!BackButton.IsEnabled&&!ForwardButton.IsEnabled&&!Navigation.IsEnabled&&!SearchButton.IsEnabled&&!Results.IsEnabled&&!CsvButton.IsEnabled&&CancelButton.IsEnabled);
+                Assert(RefreshLabel.Text.Contains("일시정지"));await AutoRefreshTickAsync();Assert(_lastRefresh==prior);
+            },true);
+            Assert(executed&&Navigation.IsEnabled&&SearchButton.IsEnabled&&!CancelButton.IsEnabled);_view.RefreshSeconds=0;
+        });
+        await Check("automatic refresh runs when due and preserves pending search edits",async()=>
+        {
+            await ShowDemoAsync();_view.RefreshSeconds=30;_lastRefreshAttempt=DateTimeOffset.Now.AddSeconds(-31);var prior=_lastRefresh;int history=_history.Count;
+            await Task.Delay(20);await AutoRefreshTickAsync(true);Assert(_lastRefresh>prior&&_history.Count==history);
+            SearchText.Text="pending search";_lastRefreshAttempt=DateTimeOffset.Now.AddSeconds(-31);prior=_lastRefresh;
+            await AutoRefreshTickAsync(true);Assert(_lastRefresh==prior&&SearchText.Text=="pending search");_view.RefreshSeconds=0;
+        });
+        await Check("output collisions and unwritable parent are diagnosed before export",()=>
+        {
+            string target=Path.Combine(folder,"occupied.txt");File.WriteAllText(target,"keep");
+            try{PrepareOutput(target);throw new Exception("Expected collision");}catch(IOException){}
+            Assert(File.ReadAllText(target)=="keep");
+            try{PrepareOutput(Path.Combine(target,"blocked.csv"));throw new Exception("Expected invalid parent");}catch(IOException){}
+            return Task.CompletedTask;
+        });
+        await Check("ERT workflow writes one selected inspection and cancellation report",async()=>
+        {
+            await ShowDemoAsync();await BeginQueryAsync(new(),BrowseLevel.Inspections,new[]{"예제_DB"},default);Results.SelectedIndex=0;
+            string root=Path.Combine(folder,"ert-flow");await RunAsync(ct=>ExportErtCoreAsync(root,SelectedRows(),ct),true);
+            using var result=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(root,"결과.json")));Assert(result.RootElement.GetProperty("saved").GetInt32()==1);
+            Assert(Directory.GetFiles(root,"*.ert",SearchOption.AllDirectories).Length==1);
+            using var cts=new CancellationTokenSource();cts.Cancel();string cancelled=Path.Combine(folder,"ert-cancel");
+            try{await ExportErtCoreAsync(cancelled,SelectedRows(),cts.Token);throw new Exception("Expected cancel");}catch(OperationCanceledException){}
+            using var cancellation=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(cancelled,"결과.json")));Assert(cancellation.RootElement.GetProperty("status").GetString()=="cancelled");
+        });
         await File.WriteAllTextAsync(Path.Combine(folder,"ui-results.json"),JsonSerializer.Serialize(new{failed,checks},new JsonSerializerOptions{WriteIndented=true}));
         return failed;
     }

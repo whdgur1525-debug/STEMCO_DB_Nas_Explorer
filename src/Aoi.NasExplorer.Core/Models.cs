@@ -28,9 +28,11 @@ public sealed record ConnectionProfile
 
 public enum BrowseLevel { Models, Lots, Layers, Inspections, Defects }
 public enum ImageFilter { All, Present, Missing }
+public enum SearchTarget { ModelAndLot, Lot, Model }
 public sealed record SearchFilter
 {
     public string Text { get; init; } = "";
+    public SearchTarget Target { get; init; }
     public string Model { get; init; } = "";
     public string Lot { get; init; } = "";
     public string Layer { get; init; } = "";
@@ -38,6 +40,7 @@ public sealed record SearchFilter
     public string LayerId { get; init; } = "";
     public string InspectionId { get; init; } = "";
     public string Machine { get; init; } = "";
+    public bool MachineExact {get;init;}
     public int? Panel { get; init; }
     public int? Pc { get; init; }
     public int? DefectCode { get; init; }
@@ -64,6 +67,7 @@ public sealed record DatabaseInfo(string Name, string State, bool IsInspection, 
 public sealed record RowKey(string Server, string Database, string Table, string Id);
 public sealed class ResultRow
 {
+    public ImagePayload? SnapshotImage {get;set;}
     private static readonly JsonSerializerOptions ArrayJsonOptions=new(){NumberHandling=JsonNumberHandling.AllowNamedFloatingPointLiterals};
     public string Database { get; init; } = "";
     public Dictionary<string, object?> Values { get; init; } = new(StringComparer.Ordinal);
@@ -114,6 +118,9 @@ public sealed record ModelGeometry(double Resolution, double Left, double Top, d
 
 public interface IExplorerRepository
 {
+    IAsyncEnumerable<ResultRow> StreamAsync(ConnectionProfile profile,string database,BrowseLevel level,SearchFilter filter,bool images,Action<DateTimeOffset>? captured,CancellationToken ct,IReadOnlySet<string>? selectedIds=null);
+    Task<ScopeSummary> SummaryAsync(ConnectionProfile profile,string database,SearchFilter filter,CancellationToken ct);
+    Task WithSnapshotAsync(ConnectionProfile profile,string database,Func<IExplorerRepository,DateTimeOffset,CancellationToken,Task> consume,CancellationToken ct);
     Task<IReadOnlyList<DatabaseInfo>> DiscoverAsync(ConnectionProfile profile, CancellationToken ct);
     Task<QueryPage> QueryAsync(ConnectionProfile profile, string database, BrowseLevel level, SearchFilter filter,
         int pageSize, string? cursor, CancellationToken ct);
@@ -122,6 +129,11 @@ public interface IExplorerRepository
     Task<ModelGeometry> GeometryAsync(ConnectionProfile profile, string model, CancellationToken ct);
     Task StreamInspectionAsync(ConnectionProfile profile,string database,string inspectionId,
         Func<long,IAsyncEnumerable<ResultRow>,CancellationToken,Task> consume,CancellationToken ct);
+}
+
+public sealed record ScopeSummary(long Lots,long Inspections,long Defects,long PanelGroups,IReadOnlyList<ResultRow> Panels)
+{
+    public IReadOnlyList<ResultRow> LotCounts {get;init;}=[];
 }
 
 public static class ImageBytes
