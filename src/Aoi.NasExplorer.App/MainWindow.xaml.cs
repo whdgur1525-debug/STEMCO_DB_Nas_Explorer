@@ -49,7 +49,7 @@ public partial class MainWindow : Window
         ["unit_idx"]="유닛 ID",["unit_x"]="유닛 X",["unit_y"]="유닛 Y",["defect_type"]="AOI 코드",["vms_state"]="VMS 판정",["vms_code"]="VMS 코드",["ai_code"]="AI 코드",
         ["cause_code"]="원인 코드",["cause_key"]="원인",["defect_size"]="측정 크기",["defect_extra"]="보조 측정",["has_image"]="이미지",["image_size"]="이미지 바이트",["handler_tact_sec"]="Handler T/T (s)",["tact_ms"]="스캔 (ms)",
         ["defects"]="불량 Index",["inspection"]="검사 Index",["lot_id"]="Index",["layer"]="Layer Index",["missing_fields"]="미지원 컬럼",["layer_side"]="레이어 코드",["layer_direction"]="방향 코드",["layer_recipe"]="프로파일",["layer_resolution_code"]="해상도 코드",["stored_defect_count"]="패널 불량 전체"
-        ,["inspection_count"]="검사 기록 수",["defect_count"]="검색 일치 불량"
+        ,["inspection_count"]="검사 기록 수",["defect_count"]="검색 일치 불량",["raw_x"]="원시 X",["raw_y"]="원시 Y",["cad_x"]="CAD X (원본)",["cad_y"]="CAD Y (원본)",["ert_cad_x"]="CAD X (ERT 정수)",["ert_cad_y"]="CAD Y (ERT 정수)",["source_block_idx"]="바 번호 (원본)",["source_axis_x"]="축 X (원본)",["source_axis_y"]="축 Y (원본)"
     };
     public MainWindow(bool smoke=false)
     {
@@ -64,7 +64,7 @@ public partial class MainWindow : Window
         string line=$"{DateTime.Now:HH:mm:ss}  {text}";
         if(LogBox.Text.Length>60000)LogBox.Text=LogBox.Text[^30000..];
         LogBox.AppendText(line+Environment.NewLine);LogBox.ScrollToEnd();
-        if(!_smoke)try{ProfileStore.AppendLog(line);}catch(IOException){Status.Text="작업 로그 파일 저장 실패 · 화면 기록을 확인하세요";}
+        if(!_smoke)try{ProfileStore.AppendLog(line);}catch(Exception ex) when(ex is IOException or UnauthorizedAccessException){Status.Text="작업 로그 파일 저장 실패 · 화면 기록을 확인하세요";}
     }
     private async Task RunAsync(Func<CancellationToken,Task> action,bool export=false)
     {
@@ -105,16 +105,21 @@ public partial class MainWindow : Window
     {
         await RunAsync(async ct=>
         {
-            var repo=new ExplorerRepository();var found=await repo.DiscoverAsync(next,ct);ct.ThrowIfCancellationRequested();
+            var repo=new ExplorerRepository();IReadOnlyList<DatabaseInfo> found;
+            try{found=await repo.DiscoverAsync(next,ct);ct.ThrowIfCancellationRequested();}catch{repo.Dispose();throw;}
             _detailCts?.Cancel();if(_repository is IDisposable previousRepository)previousRepository.Dispose();
             _repository=repo;_profile=next;_demo=false;_databases=found.ToList();ResetExperience();ClearImages();
+            var initial=new SearchFilter{Target=SelectedTarget()};_checkedRecords.Clear();_rows.Clear();_queryDatabases.Clear();_filter=initial;_clearFolderContext=true;
+            _level=initial.Target==SearchTarget.Model?BrowseLevel.Models:BrowseLevel.Lots;LevelBox.SelectedIndex=(int)_level;ShowFilterInputs(initial);BindRows();
+            DefectImage.Source=null;Details.ItemsSource=null;DetailSource.Text="새 연결에서 조회할 기록을 선택하세요.";
             ConnectionLabel.Text=$"{next.Name} · {next.Host}:{next.Port} · 읽기 전용";
-            if(!_smoke)ProfileStore.Save(next,remember);ConfigureNavigation();
+            if(!_smoke)try{ProfileStore.Save(next,remember);}catch(Exception ex) when(ex is IOException or UnauthorizedAccessException or CryptographicException){Log("연결 설정 저장 실패 · 이번 연결은 유지합니다: "+ExplorerRepository.SafeError(ex));}
+            ConfigureNavigation();
             Log($"연결 완료 · 검사 DB {found.Count(x=>x.IsInspection)}개 / 확인 대상 {found.Count}개");
             foreach(var db in found.Where(x=>x.Error is not null))Log($"{db.Name}: {db.Error}");
             if(next.Host is "127.0.0.1" or "localhost" or "::1")
                 if(ScopeBox.ItemsSource is IEnumerable<Scope> scopes&&scopes.FirstOrDefault(x=>x.Database==next.ManagementDatabase) is Scope localScope)ScopeBox.SelectedItem=localScope;
-            await BeginQueryAsync(ReadFilter() with{Target=SelectedTarget()},(BrowseLevel)LevelBox.SelectedIndex,SelectedDatabases(),ct,false,allDatabases:ScopeBox.SelectedItem is Scope{Database:null});
+            await BeginQueryAsync(initial,_level,SelectedDatabases(),ct,false,allDatabases:ScopeBox.SelectedItem is Scope{Database:null});
         });
     }
     public async Task ShowDemoAsync(bool defects=false)
@@ -185,7 +190,8 @@ public partial class MainWindow : Window
         var f=new SearchFilter{Text=SearchText.Text.Trim(),Target=SelectedTarget(),Model=ModelText.Text.Trim(),Lot=LotText.Text.Trim(),Layer=LayerText.Text.Trim(),Machine=MachineText.Text.Trim(),Panel=Int(PanelText),Pc=Int(PcText),DefectCode=Int(DefectText),VmsCode=Int(VmsText),AiCode=Int(AiText),CauseCode=Int(CauseCodeText),CauseText=CauseText.Text.Trim(),MinimumSize=Num(MinSizeText),MaximumSize=Num(MaxSizeText),From=FromDate.SelectedDate,UntilExclusive=ToDate.SelectedDate?.AddDays(1),VmsState=StateBox.SelectedIndex<=0?null:StateBox.SelectedIndex-1,Images=(ImageFilter)ImageFilterBox.SelectedIndex,LatestOnly=LatestCheck.IsChecked==true};
         var selected=SelectedDatabases();bool sameSource=!_clearFolderContext&&_queryDatabases.Count==1&&selected.Length==1&&_queryDatabases[0]==selected[0];
         bool sameLot=f.Model==_filter.Model&&f.Lot==_filter.Lot;bool sameLayer=sameLot&&f.Layer==_filter.Layer;
-        f=f with{LotId=sameSource&&sameLot?_filter.LotId:"",LayerId=sameSource&&sameLayer?_filter.LayerId:"",InspectionId=sameSource&&sameLayer&&LevelBox.SelectedIndex==(int)_level?_filter.InspectionId:"",MachineExact=sameSource&&f.Machine==_filter.Machine&&_filter.MachineExact};
+        bool sameInspection=sameLayer&&f.Machine==_filter.Machine&&f.Panel==_filter.Panel&&f.Pc==_filter.Pc&&f.LatestOnly==_filter.LatestOnly;
+        f=f with{LotId=sameSource&&sameLot?_filter.LotId:"",LayerId=sameSource&&sameLayer?_filter.LayerId:"",InspectionId=sameSource&&sameInspection&&LevelBox.SelectedIndex==(int)_level?_filter.InspectionId:"",MachineExact=sameSource&&f.Machine==_filter.Machine&&_filter.MachineExact};
         f.Validate();return f;
     }
     private void ShowFilterInputs(SearchFilter f)
@@ -206,7 +212,7 @@ public partial class MainWindow : Window
     private async Task BeginQueryAsync(SearchFilter filter,BrowseLevel level,IEnumerable<string> databases,CancellationToken ct,bool history=true,Location[]? trail=null,bool allDatabases=false)
     {
         _lastRefreshAttempt=DateTimeOffset.Now;
-        _checkedRecords.Clear();
+        int clearedChecks=_checkedRecords.Count;_checkedRecords.Clear();
         _summaryRows.Clear();_lotSummaryRows.Clear();PanelSummary.ItemsSource=LotSummary.ItemsSource=null;SummaryLabel.Text="조회·전체 건수 집계 중…";
         if(history&&_queryDatabases.Count>0){_history.Push(CaptureNavigation());_forward.Clear();}
         if(allDatabases)filter=filter with{LotId="",LayerId="",InspectionId=""};
@@ -218,6 +224,7 @@ public partial class MainWindow : Window
         RenderScopePath();
         Notice.Text=_demo?"예제 데이터입니다. 실제 검사 결과가 아닙니다.":"DB별 순차 조회 · 열 정렬은 현재 표시된 목록에 적용 · NULL / 없는 컬럼은 상세에서 구분";
         BindRows();await LoadPageAsync(ct);await LoadSummaryAsync(ct);
+        if(clearedChecks>0&&!_restoringChecks)Notice.Text+=$" · 검색·경로 변경으로 이전 체크 {clearedChecks:N0}개 해제";
         _lastRefresh=DateTimeOffset.Now;ScheduleAutoRefresh();UpdateRefreshLabel();UpdateActions();
     }
     private async Task LoadPageAsync(CancellationToken ct)
@@ -246,19 +253,28 @@ public partial class MainWindow : Window
         RememberColumns();
         _table=new DataTable();_table.Columns.Add("__index",typeof(int));_table.Columns.Add("source_database",typeof(string));
         _table.Columns.Add("__checked",typeof(bool));
-        foreach(var row in _rows)EnrichLayer(row);
+        foreach(var row in _rows)
+        {
+            EnrichLayer(row);
+            if(_level==BrowseLevel.Defects)foreach(string axis in new[]{"x","y"})
+            {double? value=row.Number("cad_"+axis);row.Values["ert_cad_"+axis]=value is double number&&double.IsFinite(number)&&number>=int.MinValue&&number<=int.MaxValue?(object)(int)Math.Truncate(number):null;}
+        }
         foreach(string name in _rows.SelectMany(x=>x.Values.Keys).Distinct(StringComparer.Ordinal))_table.Columns.Add(name,typeof(object));
+        if(_level==BrowseLevel.Defects)foreach(string name in new[]{"unit_x","unit_y","raw_x","raw_y","cad_x","cad_y","ert_cad_x","ert_cad_y","source_block_idx","source_axis_x","source_axis_y"})if(!_table.Columns.Contains(name))_table.Columns.Add(name,typeof(object));
         for(int i=0;i<_rows.Count;i++){var dr=_table.NewRow();dr["__index"]=i;dr["source_database"]=_rows[i].Database;dr["__checked"]=_checkedRecords.ContainsKey(CheckKey(_rows[i]));foreach(var pair in _rows[i].Values)dr[pair.Key]=pair.Value??DBNull.Value;_table.Rows.Add(dr);}
         _table.ColumnChanged+=CheckedColumnChanged;
         Results.Columns.Clear();
         AddCheckColumn();
-        string[] preferred=["lot_id","model_name","lot_id_name","layer_name","layer_side","layer_direction","layer_recipe","layer_resolution_code","panel_no","machine_id","inspection_time","stored_defect_count","defect_count","inspection_count","defect_type","vms_state","vms_code","cause_key","defect_size","has_image","inspection_status","lot_time","lot_status","vms_status","retest_count","handler_tact_sec","tact_ms","unit_idx","unit_x","unit_y","source_database"];
+        string[] preferred=["lot_id","model_name","lot_id_name","layer_name","layer_side","layer_direction","layer_recipe","layer_resolution_code","panel_no","machine_id","inspection_time","stored_defect_count","defect_count","inspection_count","defect_type","vms_state","vms_code","cause_key","defect_size","has_image","inspection_status","lot_time","lot_status","vms_status","retest_count","handler_tact_sec","tact_ms","unit_idx","unit_x","unit_y","raw_x","raw_y","cad_x","cad_y","ert_cad_x","ert_cad_y","source_block_idx","source_axis_x","source_axis_y","source_database"];
         foreach(DataColumn column in _table.Columns.Cast<DataColumn>().OrderBy(x=>Array.IndexOf(preferred,x.ColumnName) is int index&&index>=0?index:1000+x.Ordinal))
         {
             if(!ShowMainColumn(column.ColumnName))continue;
             var binding=new System.Windows.Data.Binding("["+column.ColumnName+"]"){TargetNullValue="—",Converter=DisplayConverter.Instance};
             var width=_view.ColumnWidths.TryGetValue(column.ColumnName,out double saved)?new DataGridLength(Math.Clamp(saved,65,600)):DataGridLength.Auto;
-            Results.Columns.Add(new DataGridTextColumn{Header=Labels.GetValueOrDefault(column.ColumnName,column.ColumnName),Binding=binding,SortMemberPath=column.ColumnName,MinWidth=65,MaxWidth=600,Width=width});
+            var display=new DataGridTextColumn{Header=Labels.GetValueOrDefault(column.ColumnName,column.ColumnName),Binding=binding,SortMemberPath=column.ColumnName,MinWidth=65,MaxWidth=600,Width=width};
+            string? tip=column.ColumnName switch{"raw_x" or "raw_y"=>"DB 원본 좌표입니다. ERT 파일에는 소수점 6자리로 기록됩니다.","cad_x" or "cad_y"=>"DB 원본 CAD 소수 좌표입니다. ERT 정수 좌표는 별도 열에서 확인하세요.","ert_cad_x" or "ert_cad_y"=>"ERT 내보내기 규약대로 CAD 원본의 소수 부분을 버린 정수입니다.","source_axis_x" or "source_axis_y"=>"DB에 기록된 원본 축입니다. 구형 기록의 0/NULL은 미기록일 수 있으며 모델 재계산 값이 아닙니다.","source_block_idx"=>"DB 원본은 1부터 시작하는 바 번호입니다. ERT 파일은 0부터 기록합니다.",_=>null};
+            if(tip is not null){var style=new Style(typeof(System.Windows.Controls.Primitives.DataGridColumnHeader),TryFindResource(typeof(System.Windows.Controls.Primitives.DataGridColumnHeader)) as Style);style.Setters.Add(new Setter(ToolTipService.ToolTipProperty,tip));display.HeaderStyle=style;}
+            Results.Columns.Add(display);
         }
         Results.ItemsSource=_table.DefaultView;
         UpdateCheckedLabel();
@@ -338,7 +354,7 @@ public partial class MainWindow : Window
         if(_queryCts is not null)return;
         foreach(var t in new[]{SearchText,ModelText,LotText,LayerText,MachineText,PanelText,PcText,DefectText,VmsText,AiText,CauseCodeText,CauseText,MinSizeText,MaxSizeText})t.Clear();
         FromDate.SelectedDate=ToDate.SelectedDate=null;StateBox.SelectedIndex=ImageFilterBox.SelectedIndex=0;LatestCheck.IsChecked=false;
-        _clearFolderContext=true;ScopeBox.SelectedIndex=0;
+        _clearFolderContext=true;Notice.Text="입력한 조건을 초기화했습니다. DB 선택은 유지됩니다. 목록에 반영하려면 '현재 범위에 조건 적용'을 누르세요.";
     }
     private string? PickFolder(string title)
     {var dialog=new OpenFolderDialog{Title=title,Multiselect=false};return ShowModal(()=>dialog.ShowDialog(this))==true?dialog.FolderName:null;}

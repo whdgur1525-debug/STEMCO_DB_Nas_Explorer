@@ -224,7 +224,7 @@ public partial class MainWindow
         await Check("checkbox selection, visible select-all and clearing are explicit",async()=>
         {
             await ShowDemoAsync();SetVisibleChecks(true);Assert(_checkedRecords.Count==15&&CheckedLabel.Text.Contains("15"));
-            ClearChecked_Click(new Button(),new System.Windows.RoutedEventArgs());Assert(_checkedRecords.Count==0);
+            ApplyCheckedReview(Array.Empty<string>());Assert(_checkedRecords.Count==0);
             _table.Rows[0]["__checked"]=true;Assert(_checkedRecords.Count==1&&BundleButton.IsEnabled);
             var scopes=CreateBundleScopes(BundleMode.Checked,null);Assert(scopes.Count==1&&scopes[0].Filter.LotId==_rows[0].Text("lot_id"));
         });
@@ -272,9 +272,53 @@ public partial class MainWindow
             await ShowDemoAsync();Assert(!ImageInfo.Text.Contains("16384")&&!ImageInfo.Text.Contains("16,384"));
             UpdateResultContextMenu();Assert(!Results.ContextMenu.Items.OfType<MenuItem>().Single(x=>Convert.ToString(x.Tag)=="ert").IsEnabled);
         });
+        await Check("coordinate columns keep raw precision and checkbox stays fixed on horizontal scroll",async()=>
+        {
+            await ShowDemoAsync(true);_rows[0].Values["cad_x"]=151.38186645507812;BindRows();
+            await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.ApplicationIdle);UpdateLayout();
+            foreach(string name in new[]{"raw_x","raw_y","cad_x","cad_y","ert_cad_x","ert_cad_y","unit_x","unit_y","source_axis_x","source_axis_y"})Assert(Results.Columns.Any(x=>x.SortMemberPath==name));
+            Assert(_rows[0].Number("cad_x")==151.38186645507812&&_rows[0].Long("ert_cad_x")==151&&Results.FrozenColumnCount==1&&Results.Columns[0].IsFrozen&&!Results.Columns[0].CanUserReorder);
+            _table.Rows[0]["__checked"]=true;Assert(_checkHeader!.IsChecked is null);SetVisibleChecks(true);Assert(_checkHeader.IsChecked==true);SetVisibleChecks(false);Assert(_checkHeader.IsChecked==false);
+            static IEnumerable<System.Windows.DependencyObject> Walk(System.Windows.DependencyObject root){for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){var child=VisualTreeHelper.GetChild(root,i);yield return child;foreach(var item in Walk(child))yield return item;}}
+            var scroll=Walk(Results).OfType<ScrollViewer>().First(x=>x.ScrollableWidth>0);double left=_checkHeader.TransformToAncestor(Results).Transform(new System.Windows.Point()).X;
+            scroll.ScrollToRightEnd();await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.ApplicationIdle);UpdateLayout();
+            Assert(scroll.HorizontalOffset>0&&Math.Abs(_checkHeader.TransformToAncestor(Results).Transform(new System.Windows.Point()).X-left)<1);
+        });
+        await Check("edited panel and exact hierarchy filters are not pinned to the prior inspection",async()=>
+        {
+            await ShowDemoAsync();
+            await BeginQueryAsync(new(){Model="p2411-004d101",Lot="agsd",Layer="L1-T-SHORT3.1-0200",LotId="1",LayerId="1",InspectionId="1",Panel=1,Machine="EQ_09",MachineExact=true},BrowseLevel.Defects,new[]{"예제_DB"},default);
+            PanelText.Text="2";Assert(ReadFilter().InspectionId==""&&CreateSearchFilter().Panel==2);
+            ModelText.Text="p2412-022d601";LotText.Text="ATMAET202TEST";LayerText.Text="L2-B-SHORT3.1-0200";
+            var search=CreateSearchFilter();Assert(search.Model=="p2412-022d601"&&search.Lot=="ATMAET202TEST"&&search.Layer=="L2-B-SHORT3.1-0200"&&search.InspectionId=="");
+        });
+        await Check("refresh preserves checks and reviewed previous-page removals update export scope",async()=>
+        {
+            await ShowDemoAsync();_table.Rows[0]["__checked"]=true;string key=_checkedRecords.Keys.Single();
+            await RefreshCurrentAsync();Assert(_checkedRecords.ContainsKey(key)&&(bool)_table.Rows[0]["__checked"]);
+            var prior=new ResultRow{Database="예제_DB",Values=new(){["lot_id"]=9001,["model_name"]="p2411-004d101",["lot_id_name"]="이전구간LOT"}};
+            string previous=CheckKey(prior);_checkedRecords[previous]=prior;
+            var dialog=new CheckedItemsWindow(_checkedRecords,_rows.Select(CheckKey).ToHashSet(StringComparer.Ordinal),_level);
+            Assert(dialog.Entries.Count==2&&dialog.Entries.Single(x=>x.Key==previous).Position=="이전 표시 구간");
+            dialog.Remove(new[]{previous});Assert(_checkedRecords.Count==2);
+            ApplyCheckedReview(dialog.RetainedKeys);Assert(_checkedRecords.Count==1&&(bool)_table.Rows[0]["__checked"]&&CreateBundleScopes(BundleMode.Checked,null).Count==1);dialog.Close();
+            await BeginQueryAsync(new(){Text="agsd",Target=SearchTarget.Lot},BrowseLevel.Lots,new[]{"예제_DB"},default);
+            Assert(_checkedRecords.Count==0&&Notice.Text.Contains("이전 체크 1개 해제"));
+        });
+        await Check("minimum window keeps result rows selectable while advanced filters are open",async()=>
+        {
+            await ShowDemoAsync();double width=Width,height=Height;Width=1100;Height=720;DetailSearchExpander.IsExpanded=true;
+            await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.ApplicationIdle);UpdateLayout();
+            double required=Results.ColumnHeaderHeight+Results.RowHeight+System.Windows.SystemParameters.HorizontalScrollBarHeight;
+            if(Results.ActualHeight<required)throw new InvalidOperationException($"Minimum window needs a full row and scrollbar: {Results.ActualHeight:N1}px < {required:N1}px");
+            var visual=(System.Windows.FrameworkElement)Content;var bitmap=new RenderTargetBitmap((int)visual.ActualWidth,(int)visual.ActualHeight,96,96,PixelFormats.Pbgra32);bitmap.Render(visual);var png=new PngBitmapEncoder();png.Frames.Add(BitmapFrame.Create(bitmap));using(var stream=File.Create(Path.Combine(folder,"최소창_필터펼침.png")))png.Save(stream);
+            Width=width;Height=height;DetailSearchExpander.IsExpanded=false;
+        });
         await Check("modal dialog scope defers idle pause and resets inactivity on return",()=>
         {
-            ShowModal(()=>{_lastUserInteraction=DateTimeOffset.Now.AddMinutes(-11);Assert(!EnterIdleIfDueAsync().GetAwaiter().GetResult()&&!_idleLocked);return null;});
+            var refreshed=_lastRefresh;_view.RefreshSeconds=60;_nextAutoRefreshAt=DateTimeOffset.Now.AddSeconds(-1);
+            ShowModal(()=>{_lastUserInteraction=DateTimeOffset.Now.AddMinutes(-11);Assert(!EnterIdleIfDueAsync().GetAwaiter().GetResult()&&!_idleLocked);Assert(AutoRefreshTickAsync(true).IsCompletedSuccessfully&&_lastRefresh==refreshed);return null;});
+            _view.RefreshSeconds=0;ScheduleAutoRefresh();
             Assert(DateTimeOffset.Now-_lastUserInteraction<TimeSpan.FromSeconds(1));return Task.CompletedTask;
         });
         await Check("idle pause disables automatic reads and resumes only through explicit refresh",async()=>

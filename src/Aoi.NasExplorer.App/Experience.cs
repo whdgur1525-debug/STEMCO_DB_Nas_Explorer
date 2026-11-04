@@ -17,7 +17,8 @@ namespace Aoi.NasExplorer.App;
 public partial class MainWindow
 {
     private sealed record Location(SearchFilter Filter,BrowseLevel Level,string[] Databases,bool AllDatabases=false);
-    private sealed record NavigationState(Location Current,Location[] Trail);
+    private sealed record NavigationState(Location Current,Location[] Trail)
+    { public RowKey? SelectedKey {get;init;} }
     private readonly Stack<NavigationState> _forward=new();
     private readonly List<Location> _trail=[];
     private readonly DispatcherTimer _refreshTimer=new();
@@ -32,6 +33,7 @@ public partial class MainWindow
     private bool _experienceReady;
     private bool _detailLoading;
     private bool _allDatabases;
+    private bool _restoringChecks;
 
     private void InitializeExperience()
     {
@@ -39,6 +41,17 @@ public partial class MainWindow
         AutoRefreshBox.SelectedIndex=_view.RefreshSeconds switch{>0 and <300=>1,>=300=>2,_=>0};
         if(_view.RefreshSeconds>0)_view.RefreshSeconds=Math.Max(60,_view.RefreshSeconds);
         InitializeIdleSession();ScheduleAutoRefresh();
+        void FitFilters()
+        {
+            bool small=ActualHeight<800;DetailFilterScroll.MaxHeight=Math.Clamp(ActualHeight-650,70,180);ScopeScroll.MaxHeight=small?40:180;
+            SummaryLabel.Margin=new Thickness(0,small?2:5,0,small?2:5);
+            foreach(var label in new[]{Breadcrumb,SummaryLabel,ActiveFilterLabel,Notice}){label.TextWrapping=small?TextWrapping.NoWrap:TextWrapping.Wrap;label.TextTrimming=TextTrimming.CharacterEllipsis;}
+            OpenInspectionsButton.Visibility=OpenDefectsButton.Visibility=small?Visibility.Collapsed:Visibility.Visible;
+            PanelSummary.MaxHeight=LotSummary.MaxHeight=small?85:180;
+        }
+        SizeChanged+=(_,_)=>FitFilters();FitFilters();
+        DetailSearchExpander.Expanded+=(_,_)=>{if(ActualHeight<800)SummaryExpander.IsExpanded=false;};
+        SummaryExpander.Expanded+=(_,_)=>{if(ActualHeight<800)DetailSearchExpander.IsExpanded=false;};
         _refreshTimer.Interval=TimeSpan.FromSeconds(1);
         _refreshTimer.Tick+=async(_,_)=>await AutoRefreshTickAsync();
         _refreshTimer.Start();
@@ -58,11 +71,17 @@ public partial class MainWindow
     private SearchTarget SelectedTarget()=>SearchTargetBox.SelectedIndex switch{0=>SearchTarget.Lot,1=>SearchTarget.Model,_=>SearchTarget.ModelAndLot};
     private SearchFilter CreateSearchFilter()
     {
-        var filter=ReadFilter();bool fromPanelGroup=filter.MachineExact;
-        return filter with{Model="",Lot="",Layer="",LotId="",LayerId="",InspectionId="",Machine=fromPanelGroup?"":filter.Machine,MachineExact=false,Panel=fromPanelGroup?null:filter.Panel};
+        var filter=ReadFilter();
+        bool inheritedMachine=_filter.MachineExact&&filter.Machine==_filter.Machine,inheritedPanel=_filter.MachineExact&&filter.Panel==_filter.Panel;
+        return filter with{Model=filter.Model==_filter.Model?"":filter.Model,Lot=filter.Lot==_filter.Lot?"":filter.Lot,Layer=filter.Layer==_filter.Layer?"":filter.Layer,LotId="",LayerId="",InspectionId="",Machine=inheritedMachine?"":filter.Machine,MachineExact=false,Panel=inheritedPanel?null:filter.Panel};
     }
     private async Task SearchGlobalAsync()=>await RunAsync(ct=>BeginQueryAsync(CreateSearchFilter(),SelectedTarget()==SearchTarget.Model?BrowseLevel.Models:BrowseLevel.Lots,SelectedDatabases(),ct,allDatabases:ScopeBox.SelectedItem is Scope{Database:null}));
-    private async void Filter_Click(object sender,RoutedEventArgs e)=>await RunAsync(ct=>BeginQueryAsync(ReadFilter(),_level,SelectedDatabases(),ct,allDatabases:ScopeBox.SelectedItem is Scope{Database:null}));
+    private async void Filter_Click(object sender,RoutedEventArgs e)
+    {
+        if(_idleLocked||_queryCts is not null)return;
+        await RunAsync(ct=>BeginQueryAsync(ReadFilter(),_level,SelectedDatabases(),ct,allDatabases:ScopeBox.SelectedItem is Scope{Database:null}));
+        DetailSearchExpander.IsExpanded=false;
+    }
     private async Task OpenSelectedAsync(BrowseLevel target)
     {
         if(_idleLocked||_queryCts is not null||Selected() is not ResultRow row)return;
@@ -71,7 +90,7 @@ public partial class MainWindow
     }
     private async void OpenInspections_Click(object sender,RoutedEventArgs e)=>await OpenSelectedAsync(BrowseLevel.Inspections);
     private async void OpenDefects_Click(object sender,RoutedEventArgs e)=>await OpenSelectedAsync(BrowseLevel.Defects);
-    private NavigationState CaptureNavigation()=>new(new(_filter,_level,_queryDatabases.ToArray(),_allDatabases),_trail.ToArray());
+    private NavigationState CaptureNavigation()=>new(new(_filter,_level,_queryDatabases.ToArray(),_allDatabases),_trail.ToArray()){SelectedKey=Selected()?.Key(_profile.Identity,_level)};
     private void ResetExperience(){_history.Clear();_forward.Clear();_trail.Clear();_ertAvailability.Clear();_summaryRows.Clear();}
     private void UpdatePath(SearchFilter filter,BrowseLevel level,string[] databases,Location[]? trail,bool allDatabases)
     {
@@ -87,14 +106,23 @@ public partial class MainWindow
         var from=forward?_forward:_history;var to=forward?_history:_forward;
         if(!from.TryPop(out var state))return;
         to.Push(CaptureNavigation());
-        await RunAsync(ct=>BeginQueryAsync(state.Current.Filter,state.Current.Level,state.Current.Databases,ct,false,state.Trail,state.Current.AllDatabases));
+        await RunAsync(async ct=>
+        {
+            await BeginQueryAsync(state.Current.Filter,state.Current.Level,state.Current.Databases,ct,false,state.Trail,state.Current.AllDatabases);
+            if(state.SelectedKey is not null)
+            {
+                int index=_rows.FindIndex(x=>x.Key(_profile.Identity,_level)==state.SelectedKey);Results.SelectedIndex=index;
+                if(index>=0)Results.ScrollIntoView(Results.SelectedItem);
+                else Notice.Text+=" · 이전 열람 항목은 첫 페이지에 없습니다. 목록에서 다시 선택하세요.";
+            }
+        });
     }
     private async void Forward_Click(object sender,RoutedEventArgs e)=>await NavigateHistoryAsync(true);
     private async void Refresh_Click(object sender,RoutedEventArgs e)=>await RefreshCurrentAsync();
     private async Task RefreshCurrentAsync(bool rediscover=true)
     {
         if(_idleLocked&&!_resuming||_queryCts is not null||_queryDatabases.Count==0)return;
-        var selection=Selected()?.Key(_profile.Identity,_level);var state=CaptureNavigation();
+        var selection=Selected()?.Key(_profile.Identity,_level);var state=CaptureNavigation();var checks=_checkedRecords.ToArray();
         ClearImages();_ertAvailability.Clear();
         await RunAsync(async ct=>
         {
@@ -108,7 +136,14 @@ public partial class MainWindow
                 var found=_databases.Where(x=>x.IsInspection).Select(x=>x.Name).ToArray();
                 databases=all?found:databases.Where(found.Contains).ToArray();
             }
-            await BeginQueryAsync(state.Current.Filter,state.Current.Level,databases,ct,false,state.Trail,state.Current.AllDatabases);
+            _restoringChecks=true;
+            try{await BeginQueryAsync(state.Current.Filter,state.Current.Level,databases,ct,false,state.Trail,state.Current.AllDatabases);}
+            finally
+            {
+                _restoringChecks=false;var visible=_rows.ToDictionary(CheckKey,StringComparer.Ordinal);
+                foreach(var entry in checks.Where(x=>databases.Contains(x.Value.Database)))_checkedRecords[entry.Key]=visible.GetValueOrDefault(entry.Key,entry.Value);
+                ApplyCheckedReview(_checkedRecords.Keys.ToArray());
+            }
             if(selection is not null)
             {
                 int index=_rows.FindIndex(x=>x.Key(_profile.Identity,_level)==selection);
@@ -127,7 +162,7 @@ public partial class MainWindow
     {
         if(await EnterIdleIfDueAsync())return;
         UpdateRefreshLabel();
-        if(_view.RefreshSeconds<=0||_queryCts is not null||!(activeOverride??IsActive)||_nextAutoRefreshAt is null||_queryDatabases.Count==0)return;
+        if(_view.RefreshSeconds<=0||_queryCts is not null||_modalDepth>0||!(activeOverride??IsActive)||_nextAutoRefreshAt is null||_queryDatabases.Count==0)return;
         // Do not overwrite an in-progress edit in search/filters or cancel a selected image load.
         if(Keyboard.FocusedElement is TextBox||_detailLoading||_checkedRecords.Count>0)return;
         try{if(ReadFilter()!=_filter||!SelectedDatabases().SequenceEqual(_queryDatabases))return;}catch(ArgumentException){return;}
@@ -233,7 +268,7 @@ public partial class MainWindow
         Enable(SummaryCsvButton,ready&&(_summaryRows.Count>0||_lotSummaryRows.Count>0),"선택한 탭의 집계 표를 저장합니다. 각 표는 DB별 최대 1,000개입니다.");
         Enable(OpenOutputButton,!busy&&_lastOutput is not null,"최근 내보내기 저장 폴더를 엽니다.");
         RefreshButton.IsEnabled=ready;CancelButton.IsEnabled=busy;SearchButton.IsEnabled=!busy;DatabasesButton.IsEnabled=ready;MoreButton.IsEnabled=ready&&_hasMore;
-        BundleButton.IsEnabled=ready&&_rows.Count>0;CheckVisibleButton.IsEnabled=ready&&_rows.Count>0;ClearCheckedButton.IsEnabled=ready&&_checkedRecords.Count>0;
+        BundleButton.IsEnabled=ready&&(_rows.Count>0||_checkedRecords.Count>0);ReviewChecksButton.IsEnabled=ready&&_checkedRecords.Count>0;
         Navigation.IsEnabled=Results.IsEnabled=PanelSummary.IsEnabled=LotSummary.IsEnabled=PathPanel.IsEnabled=!busy;
         foreach(var control in new Control[]{ScopeBox,SearchTargetBox,SearchText,AutoRefreshBox,ModelText,LotText,LayerText,MachineText,PanelText,PcText,DefectText,VmsText,AiText,CauseCodeText,CauseText,MinSizeText,MaxSizeText,FromDate,ToDate,StateBox,ImageFilterBox})control.IsEnabled=!busy;
         UpdateRefreshLabel();

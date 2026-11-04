@@ -29,6 +29,8 @@ internal static class Program
     private static async Task UnitAsync(string output)
     {
         await Check("profile rejects empty host",()=>Throws<ArgumentException>(()=>new ConnectionProfile().Validate()));
+        await Check("profile diagnostic text does not expose the password",()=>
+        {string value=(new ConnectionProfile{Password="synthetic-test-secret"}).ToString();True(!value.Contains("synthetic-test-secret",StringComparison.Ordinal)&&value.Contains("[redacted]",StringComparison.Ordinal));});
         await Check("profile rejects multiple hosts",()=>Throws<ArgumentException>(()=>new ConnectionProfile{Host="a,b"}.Validate()));
         await Check("profile rejects invalid port",()=>Throws<ArgumentException>(()=>new ConnectionProfile{Host="a",Port=0}.Validate()));
         await Check("query rejects reversed dates",()=>Throws<ArgumentException>(()=>new SearchFilter{From=new(2026,11,4),UntilExclusive=new(2026,11,3)}.Validate()));

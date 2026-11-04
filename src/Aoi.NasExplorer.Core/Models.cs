@@ -17,6 +17,7 @@ public sealed record ConnectionProfile
     public string RootCertificate { get; init; } = "";
     public int TimeoutSeconds { get; init; } = 30;
     public string Identity => $"{Host}:{Port}";
+    public override string ToString()=>$"{Name} ({Identity}, {Username}, {ManagementDatabase}, Password=[redacted])";
     public void Validate()
     {
         if (string.IsNullOrWhiteSpace(Host) || Host.Contains(',')) throw new ArgumentException("NAS 주소 한 개를 입력하세요.");

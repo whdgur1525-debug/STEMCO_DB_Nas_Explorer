@@ -37,16 +37,16 @@ public partial class MainWindow
         if(name=="lot_id")return _level==BrowseLevel.Lots;
         if(name is "layer" or "layer_id" or "missing_fields" or "fov_count" or "total_defects")return false;
         if(name=="panel_no"&&_filter.InspectionId.Length>0&&_filter.Panel.HasValue)return false;
-        if(_level==BrowseLevel.Defects)return new[]{"model_name","lot_id_name","layer_name","panel_no","machine_id","inspection_time","inspection","unit_idx","unit_x","unit_y","defect_type","vms_state","vms_code","cause_key","defect_size","has_image","defects"}.Contains(name);
+        if(_level==BrowseLevel.Defects)return new[]{"model_name","lot_id_name","layer_name","panel_no","machine_id","inspection_time","inspection","unit_idx","unit_x","unit_y","raw_x","raw_y","cad_x","cad_y","ert_cad_x","ert_cad_y","source_block_idx","source_axis_x","source_axis_y","defect_type","vms_state","vms_code","cause_key","defect_size","has_image","defects"}.Contains(name);
         return true;
     }
     private void AddCheckColumn()
     {
-        _checkHeader=new CheckBox{ToolTip="현재 표시된 행 전체 체크/해제. 검색 전체는 내보내기 창에서 선택합니다.",Margin=new Thickness(0)};
+        _checkHeader=new CheckBox{IsThreeState=true,ToolTip="현재 표시된 행 전체 체크/해제. 검색 전체는 내보내기 창에서 선택합니다.",Margin=new Thickness(0)};
         _checkHeader.Click+=(_,_)=>SetVisibleChecks(_checkHeader.IsChecked==true);
         var check=new FrameworkElementFactory(typeof(CheckBox));check.SetValue(FrameworkElement.HorizontalAlignmentProperty,HorizontalAlignment.Center);check.SetValue(FrameworkElement.VerticalAlignmentProperty,VerticalAlignment.Center);
         check.SetBinding(System.Windows.Controls.Primitives.ToggleButton.IsCheckedProperty,new Binding("[__checked]"){Mode=BindingMode.TwoWay,UpdateSourceTrigger=UpdateSourceTrigger.PropertyChanged});
-        Results.Columns.Add(new DataGridTemplateColumn{Header=_checkHeader,CellTemplate=new DataTemplate{VisualTree=check},Width=38,MinWidth=38,CanUserSort=false,CanUserResize=false});
+        Results.Columns.Add(new DataGridTemplateColumn{Header=_checkHeader,CellTemplate=new DataTemplate{VisualTree=check},Width=38,MinWidth=38,CanUserSort=false,CanUserResize=false,CanUserReorder=false});
     }
     private void CheckedColumnChanged(object? sender,DataColumnChangeEventArgs e)
     {
@@ -62,17 +62,13 @@ public partial class MainWindow
         try{foreach(DataRow row in _table.Rows)row["__checked"]=selected;}
         finally{_changingChecks=false;UpdateCheckedLabel();UpdateActions();}
     }
-    private void CheckVisible_Click(object sender,RoutedEventArgs e)=>SetVisibleChecks(true);
-    private void ClearChecked_Click(object sender,RoutedEventArgs e)
-    {
-        _checkedRecords.Clear();SetVisibleChecks(false);
-    }
     private void UpdateCheckedLabel()
     {
         if(CheckedLabel is null)return;
         string shown=Selected() is ResultRow row?_level switch{BrowseLevel.Models=>"열람: Model "+row.Text("model_name"),BrowseLevel.Lots=>"열람: LotID "+row.Text("lot_id_name"),BrowseLevel.Layers=>"열람: "+row.Text("layer_name"),BrowseLevel.Inspections=>"열람: 패널 "+row.Text("panel_no"),_=>"열람: 불량 "+row.Text("defects")}:"";
-        CheckedLabel.Text=$"체크 {_checkedRecords.Count:N0}개"+(shown.Length>0?" · "+shown:"");
-        if(_checkHeader is not null)_checkHeader.IsChecked=_rows.Count>0&&_rows.All(x=>_checkedRecords.ContainsKey(CheckKey(x)));
+        CheckedLabel.Text=$"체크 {_checkedRecords.Count:N0}개"+(_checkedRecords.Count>0?" 보기…":"")+(shown.Length>0?" · "+shown:"");
+        CheckedLabel.ToolTip=CheckedLabel.Text+" · 클릭해서 체크한 항목을 확인하고 해제합니다.";
+        if(_checkHeader is not null){int count=_rows.Count(x=>_checkedRecords.ContainsKey(CheckKey(x)));_checkHeader.IsChecked=count==0?false:count==_rows.Count?true:null;}
     }
     private void RenderScopePath()
     {
@@ -92,7 +88,7 @@ public partial class MainWindow
         Part("Model ("+(f.Model.Length>0?f.Model:"전체")+")",f with{Lot="",LotId="",Layer="",LayerId="",InspectionId="",Panel=null,Text=""},f.Model.Length>0?BrowseLevel.Lots:BrowseLevel.Models,true);
         Part("LotID ("+(f.Lot.Length>0?f.Lot:"전체")+")",f with{Layer="",LayerId="",InspectionId="",Panel=null},f.Lot.Length>0?BrowseLevel.Layers:BrowseLevel.Lots,true);
         Part("Layer ("+(f.Layer.Length>0?f.Layer:"전체")+")",f with{InspectionId="",Panel=null},f.Layer.Length>0?BrowseLevel.Inspections:BrowseLevel.Layers,f.Lot.Length>0||f.Layer.Length>0);
-        if(f.Panel.HasValue)PathPanel.Children.Add(new TextBlock{Text=$" / 패널 ({f.Panel}) · 검사 Index {f.InspectionId}",FontSize=12});
+        if(f.Panel.HasValue)PathPanel.Children.Add(new TextBlock{Text=$" / 패널 ({f.Panel})"+(f.InspectionId.Length>0?$" · 검사 Index {f.InspectionId}":""),FontSize=12});
         if(f.Layer.Length>0)
         {
             var row=new ResultRow{Values=new(){["layer_name"]=f.Layer}};EnrichLayer(row);

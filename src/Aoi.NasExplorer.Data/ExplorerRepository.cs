@@ -335,6 +335,18 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
         }
         return new(Required(bp,"image_resolution"),Required(ir,"x"),Required(ir,"y"),Required(ir,"x")+Required(ir,"width"),Required(ir,"y")+Required(ir,"height"),bx,by,bw[0],bh[0],frames,Arr(cu,"unit_pos").Order().ToArray(),ew[0],eh[0],Required(ir,"width"),Required(ir,"height")){PunchApply=punchApply,PunchUnits=punches};
     }
+    private static void CancelInterruptedReader(NpgsqlCommand command,NpgsqlDataReader reader,CancellationToken ct)
+    {
+        if(!ct.IsCancellationRequested||reader.IsClosed)return;
+        // Cancel before DisposeAsync drains unread rows. A normal partial read must still be committable.
+        try{command.Cancel();}
+        catch(Exception) when(ct.IsCancellationRequested)
+        {
+            // Best effort: preserve the caller's cancellation if sending Cancel itself fails.
+            // The owning await using still disposes the reader/transaction/connection.
+        }
+    }
+
     public async Task StreamInspectionAsync(ConnectionProfile p,string database,string inspectionId,
         Func<long,IAsyncEnumerable<ResultRow>,CancellationToken,Task> consume,CancellationToken ct)
     {
@@ -351,7 +363,8 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
             var columns=s.Keys.Where(x=>x.StartsWith("defects.",StringComparison.Ordinal)).Select(x=>x[8..]).Where(x=>x!="image").Order(StringComparer.Ordinal);
             await using var cmd=new NpgsqlCommand($"SELECT {string.Join(",",columns.Select(Quoted))} FROM public.defects WHERE inspection=@id ORDER BY unit_idx,defects",c,transaction);cmd.Parameters.AddWithValue("id",id);
             await using var reader=await cmd.ExecuteReaderAsync(token);
-            while(await reader.ReadAsync(token))yield return ReadRow(reader,database);
+            try{while(await reader.ReadAsync(token))yield return ReadRow(reader,database);}
+            finally{CancelInterruptedReader(cmd,reader,token);}
         }
         await consume(count,Rows(ct),ct);if(transaction is not null)await transaction.CommitAsync(ct);
         }finally{if(_snapshot is null)await c.DisposeAsync();}
@@ -378,6 +391,8 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
                 await using var cmd=new NpgsqlCommand($"SELECT {projection},octet_length(image) AS __nas_payload_size,CASE WHEN octet_length(image)<=67108864 THEN image END AS __nas_payload FROM public.defects WHERE inspection=@id ORDER BY unit_idx,defects",c,transaction);
                 cmd.Parameters.AddWithValue("id",id);
                 await using var reader=await cmd.ExecuteReaderAsync(System.Data.CommandBehavior.SequentialAccess,token);
+                try
+                {
                 while(await reader.ReadAsync(token))
                 {
                     token.ThrowIfCancellationRequested();var values=new Dictionary<string,object?>(StringComparer.Ordinal);
@@ -398,6 +413,8 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
                     // Image errors belong to this row; transport/reader failures still abort the panel snapshot.
                     yield return new(){Database=database,Values=values,SnapshotImage=image,SnapshotImageError=error};
                 }
+                }
+                finally{CancelInterruptedReader(cmd,reader,token);}
             }
             await consume(count,Rows(ct),ct);if(transaction is not null)await transaction.CommitAsync(ct);
         }
