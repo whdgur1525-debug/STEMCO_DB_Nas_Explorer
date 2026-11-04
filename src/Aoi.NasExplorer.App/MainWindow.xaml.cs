@@ -277,9 +277,11 @@ public partial class MainWindow : Window
         UpdateCheckedLabel();
         UpdateActions();if(_exporting)return;
         _detailCts?.Cancel();var cts=new CancellationTokenSource();_detailCts=cts;
-        _detailLoading=false;if(Selected() is not ResultRow row)return;
+        _detailLoading=false;
+        _image=null;DefectImage.Source=null;ImagePlaceholder.Visibility=Visibility.Visible;ImagePlaceholder.Text="불량을 선택하면 이미지를 표시합니다";ImageInfo.Text="불량 목록에서 기록을 선택하면 이미지 정보를 표시합니다";
+        if(Selected() is not ResultRow row)return;
         _detailLoading=true;
-        _image=null;DefectImage.Source=null;ImagePlaceholder.Visibility=Visibility.Visible;ImagePlaceholder.Text="선택한 기록 읽는 중…";ImageInfo.Text="선택한 기록의 이미지 확인 중…";
+        ImagePlaceholder.Text="선택한 기록 읽는 중…";if(_level==BrowseLevel.Defects)ImageInfo.Text="선택한 기록의 이미지 확인 중…";
         try
         {
             var key=row.Key(_profile.Identity,_level);
@@ -296,7 +298,7 @@ public partial class MainWindow : Window
             ImageInfo.Text=$"{bitmap.PixelWidth} × {bitmap.PixelHeight} · {_image.Bytes.Length:N0} bytes · {_image.Channels}채널 · 우클릭 저장";
         }
         catch(OperationCanceledException){}
-        catch(Exception ex){if(ReferenceEquals(_detailCts,cts)){ImagePlaceholder.Text=ExplorerRepository.SafeError(ex);Log(ExplorerRepository.SafeError(ex));}}
+        catch(Exception ex){if(ReferenceEquals(_detailCts,cts)){ImagePlaceholder.Text=ExplorerRepository.SafeError(ex);ImageInfo.Text="이미지·상세 읽기 실패 · 작업 기록을 확인하세요";Log(ExplorerRepository.SafeError(ex));}}
         finally{if(ReferenceEquals(_detailCts,cts)){_detailLoading=false;UpdateActions();}}
     }
     private BitmapSource CachedBitmap(ImagePayload payload)
