@@ -282,6 +282,19 @@ CREATE TABLE defects(defects uuid PRIMARY KEY,inspection uuid,unit_idx int,unit_
             for(int timeout=10;timeout<24;timeout++)Equal(2,(await repo.QueryAsync(p with{TimeoutSeconds=timeout},db1,BrowseLevel.Models,new(),10,null,default)).Rows.Count);
             Equal(2,(await repo.QueryAsync(p,db1,BrowseLevel.Models,new(),10,null,default)).Rows.Count);
         });
+        await Check("panel payload stream pins metadata and image bytes before concurrent changes",async()=>
+        {
+            try
+            {
+                await repo.StreamInspectionPayloadsAsync(p,db1,"1",async(count,source,ct)=>
+                {
+                    Equal(1L,count);await Admin(p,db1,"UPDATE defects SET image=decode('aabbccdd','hex') WHERE defects=1;INSERT INTO defects(defects,inspection,unit_idx) VALUES(999,1,999)");
+                    int actual=0;await foreach(var row in source.WithCancellation(ct))
+                    {actual++;Equal("1",row.Text("defects"));Equal((byte)0,row.SnapshotImage!.Bytes[0]);True(row.SnapshotImageError is null&&!row.Values.Keys.Any(x=>x=="image"||x.StartsWith("__nas_")));}Equal(1,actual);
+                },default);
+            }
+            finally{await Admin(p,db1,"DELETE FROM defects WHERE defects=999;UPDATE defects SET image=decode('00010203','hex') WHERE defects=1");}
+        });
         await Check("same database wait can be cancelled or timed out without leaking the connection budget",async()=>
         {
             await repo.WithSnapshotAsync(p,db1,async(scoped,_,ct)=>
@@ -352,6 +365,8 @@ CREATE TABLE defects(defects uuid PRIMARY KEY,inspection uuid,unit_idx int,unit_
             catch(OperationCanceledException){}
             using var receipt=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(root,"내보내기결과.json")));
             Equal("cancelled",receipt.RootElement.GetProperty("status").GetString());Equal(5,(await Q(BrowseLevel.Defects)).Rows.Count);
+            string spool=receipt.RootElement.GetProperty("retainedSpoolDirectory").GetString()!;
+            True(Path.IsPathFullyQualified(spool)&&Directory.Exists(spool)&&!Path.GetFullPath(spool).StartsWith(Path.GetFullPath(root),StringComparison.OrdinalIgnoreCase));
         });
         await Check("bundle fixes inspection IDs then releases each panel snapshot before file conversion",async()=>
         {

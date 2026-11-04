@@ -357,6 +357,53 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
         }finally{if(_snapshot is null)await c.DisposeAsync();}
     }
 
+    public async Task StreamInspectionPayloadsAsync(ConnectionProfile p,string database,string inspectionId,
+        Func<long,IAsyncEnumerable<ResultRow>,CancellationToken,Task> consume,CancellationToken ct)
+    {
+        if(_snapshot is not null&&_snapshotDatabase!=database)throw new InvalidOperationException("스냅샷의 DB 범위를 벗어났습니다.");
+        var c=_snapshot??await OpenAsync(p,database,ct);
+        try
+        {
+            await using var transaction=_snapshot is null?await c.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead,ct):null;
+            var s=await SchemaAsync(p,c,ct);Require(s,"defects.image");object id=NativeId(inspectionId,s["defects.inspection"]);
+            long count;
+            await using(var countCommand=new NpgsqlCommand("SELECT count(*) FROM public.defects WHERE inspection=@id",c,transaction))
+            {countCommand.Parameters.AddWithValue("id",id);count=Convert.ToInt64(await countCommand.ExecuteScalarAsync(ct));}
+            async IAsyncEnumerable<ResultRow> Rows([EnumeratorCancellation]CancellationToken token=default)
+            {
+                var columns=s.Keys.Where(x=>x.StartsWith("defects.",StringComparison.Ordinal)).Select(x=>x[8..]).Where(x=>x!="image").Order(StringComparer.Ordinal).ToArray();
+                // Metadata comes first so SequentialAccess never has to revisit a BYTEA column.
+                // The CASE prevents an oversized value from being transferred or allocated at the client.
+                string projection=string.Join(",",columns.Select(Quoted));
+                await using var cmd=new NpgsqlCommand($"SELECT {projection},octet_length(image) AS __nas_payload_size,CASE WHEN octet_length(image)<=67108864 THEN image END AS __nas_payload FROM public.defects WHERE inspection=@id ORDER BY unit_idx,defects",c,transaction);
+                cmd.Parameters.AddWithValue("id",id);
+                await using var reader=await cmd.ExecuteReaderAsync(System.Data.CommandBehavior.SequentialAccess,token);
+                while(await reader.ReadAsync(token))
+                {
+                    token.ThrowIfCancellationRequested();var values=new Dictionary<string,object?>(StringComparer.Ordinal);
+                    for(int ordinal=0;ordinal<columns.Length;ordinal++)values[columns[ordinal]]=reader.IsDBNull(ordinal)?null:reader.GetValue(ordinal);
+                    int sizeOrdinal=columns.Length,payloadOrdinal=columns.Length+1;
+                    int? bytes=reader.IsDBNull(sizeOrdinal)?null:reader.GetInt32(sizeOrdinal);ImagePayload? image=null;string? error=null;
+                    if(bytes>64*1024*1024)error="이미지 한 장이 64MB를 초과합니다. 원본 추출 범위를 확인하세요.";
+                    else if(!reader.IsDBNull(payloadOrdinal))
+                    {
+                        byte[] payload=await reader.GetFieldValueAsync<byte[]>(payloadOrdinal,token);
+                        try
+                        {
+                            int Dimension(string name,int fallback)=>values.GetValueOrDefault(name) is object value?Convert.ToInt32(value,CultureInfo.InvariantCulture):fallback;
+                            image=new(payload,Dimension("image_width",0),Dimension("image_height",0),Dimension("image_channels",1),database,ResultRow.ValueText(values.GetValueOrDefault("defects")));
+                        }
+                        catch(Exception ex) when(ex is InvalidCastException or FormatException or OverflowException){error="이미지 크기 정보가 올바르지 않습니다: "+ex.Message;}
+                    }
+                    // Image errors belong to this row; transport/reader failures still abort the panel snapshot.
+                    yield return new(){Database=database,Values=values,SnapshotImage=image,SnapshotImageError=error};
+                }
+            }
+            await consume(count,Rows(ct),ct);if(transaction is not null)await transaction.CommitAsync(ct);
+        }
+        finally{if(_snapshot is null)await c.DisposeAsync();}
+    }
+
     public async Task WithSnapshotAsync(ConnectionProfile p,string database,Func<IExplorerRepository,DateTimeOffset,CancellationToken,Task> consume,CancellationToken ct)
     {
         if(_snapshot is not null)throw new InvalidOperationException("중첩 스냅샷은 지원하지 않습니다.");

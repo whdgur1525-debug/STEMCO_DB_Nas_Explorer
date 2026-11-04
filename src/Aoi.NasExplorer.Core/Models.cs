@@ -68,6 +68,7 @@ public sealed record RowKey(string Server, string Database, string Table, string
 public sealed class ResultRow
 {
     public ImagePayload? SnapshotImage {get;set;}
+    public string? SnapshotImageError {get;init;}
     private static readonly JsonSerializerOptions ArrayJsonOptions=new(){NumberHandling=JsonNumberHandling.AllowNamedFloatingPointLiterals};
     public string Database { get; init; } = "";
     public Dictionary<string, object?> Values { get; init; } = new(StringComparer.Ordinal);
@@ -129,6 +130,33 @@ public interface IExplorerRepository
     Task<ModelGeometry> GeometryAsync(ConnectionProfile profile, string model,string layer,CancellationToken ct);
     Task StreamInspectionAsync(ConnectionProfile profile,string database,string inspectionId,
         Func<long,IAsyncEnumerable<ResultRow>,CancellationToken,Task> consume,CancellationToken ct);
+    async Task StreamInspectionPayloadsAsync(ConnectionProfile profile,string database,string inspectionId,
+        Func<long,IAsyncEnumerable<ResultRow>,CancellationToken,Task> consume,CancellationToken ct)
+    {
+        // Compatibility for in-memory repositories: finish the metadata reader before opening image commands.
+        // Database implementations should override this with a bounded, single-reader payload stream.
+        long count=0;var metadata=new List<ResultRow>();
+        await StreamInspectionAsync(profile,database,inspectionId,async(total,source,token)=>
+        {
+            count=total;
+            await foreach(var row in source.WithCancellation(token)){token.ThrowIfCancellationRequested();metadata.Add(row);}
+        },ct);
+        async IAsyncEnumerable<ResultRow> Payloads([System.Runtime.CompilerServices.EnumeratorCancellation]CancellationToken token=default)
+        {
+            foreach(var row in metadata)
+            {
+                token.ThrowIfCancellationRequested();ImagePayload? image=null;string? error=null;
+                try
+                {
+                    image=await ImageAsync(profile,row.Key(profile.Identity,BrowseLevel.Defects),token);
+                    if(image?.Bytes.LongLength>64L*1024*1024)throw new InvalidDataException("이미지 한 장이 64MB를 초과합니다. 원본 추출 범위를 확인하세요.");
+                }
+                catch(Exception ex) when(ex is not OperationCanceledException){image=null;error=ex.Message;}
+                yield return new(){Database=row.Database,Values=row.Values,SnapshotImage=image,SnapshotImageError=error};
+            }
+        }
+        await consume(count,Payloads(ct),ct);
+    }
 }
 
 public sealed record ScopeSummary(long Lots,long Inspections,long Defects,long PanelGroups,IReadOnlyList<ResultRow> Panels)

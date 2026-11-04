@@ -87,7 +87,7 @@ public static class InspectionBundleExporter
         }
     }
     private static async Task<StagedPanel> StagePanelAsync(IExplorerRepository repository,ConnectionProfile profile,PanelReference plan,string stageFolder,bool images,
-        Func<ResultRow?,string,Exception,Task> failure,Action<string>? progress,CancellationToken ct)
+        Action<string>? progress,CancellationToken ct)
     {
         Directory.CreateDirectory(stageFolder);StagedPanel? staged=null;
         await repository.WithSnapshotAsync(profile,plan.Database,async(snapshot,captured,token)=>
@@ -98,10 +98,12 @@ public static class InspectionBundleExporter
             ResultRow? layerDetail=null;string layerId=inspection.Text("layer_id");
             if(layerId.Length>0)layerDetail=await snapshot.DetailAsync(profile,new(profile.Identity,plan.Database,"layer",layerId),token);
             string rowsFile=Path.Combine(stageFolder,"rows.jsonl"),rowsPending=rowsFile+".partial";
+            string? imagesFile=images?Path.Combine(stageFolder,"images.jsonl"):null;
+            await using var imageWriter=imagesFile is null?null:new StreamWriter(new FileStream(imagesFile+".partial",FileMode.CreateNew,FileAccess.Write,FileShare.Read,65536,true),new UTF8Encoding(false));
             long expected=0,actual=0;var barCounts=new Dictionary<string,long>(StringComparer.Ordinal);var punchUnits=new HashSet<int>();bool unknownPunch=false;
             await using(var rowsWriter=new StreamWriter(new FileStream(rowsPending,FileMode.CreateNew,FileAccess.Write,FileShare.Read,65536,true),new UTF8Encoding(false)))
             {
-                await snapshot.StreamInspectionAsync(profile,plan.Database,plan.Inspection,async(count,source,readToken)=>
+                async Task Consume(long count,IAsyncEnumerable<ResultRow> source,CancellationToken readToken)
                 {
                     expected=count;
                     await foreach(var row in source.WithCancellation(readToken))
@@ -111,46 +113,39 @@ public static class InspectionBundleExporter
                         {if(row.Long("unit_idx") is long unit&&unit>=0&&unit<=int.MaxValue)punchUnits.Add((int)unit);else unknownPunch=true;}
                         else
                         {string bar=row.Long("source_metadata_version")>=1&&row.Long("source_block_idx")>0?row.Text("source_block_idx"):"미기록";barCounts[bar]=barCounts.GetValueOrDefault(bar)+1;}
+                        if(imageWriter is not null)
+                        {
+                            StoredImage record;
+                            try
+                            {
+                                if(row.SnapshotImageError is string imageError)throw new InvalidDataException(imageError);
+                                var payload=row.SnapshotImage;
+                                if(payload is null||payload.Bytes.Length==0)record=new(actual,row.Text("defects"),"not_recorded",null,0,0,0,0,"DB 이미지 미기록 또는 0바이트");
+                                else
+                                {
+                                    string name=actual.ToString("D12",System.Globalization.CultureInfo.InvariantCulture)+".bytea",path=Path.Combine(stageFolder,name),pending=path+".partial";
+                                    await using(var file=new FileStream(pending,FileMode.CreateNew,FileAccess.Write,FileShare.Read,65536,true))await file.WriteAsync(payload.Bytes,readToken);
+                                    readToken.ThrowIfCancellationRequested();File.Move(pending,path,false);
+                                    record=new(actual,row.Text("defects"),"staged",name,payload.Width,payload.Height,payload.Channels,payload.Bytes.LongLength,null);
+                                }
+                            }
+                            catch(Exception ex) when(ex is not OperationCanceledException)
+                            {record=new(actual,row.Text("defects"),"failed",null,0,0,0,0,ex.Message);}
+                            await imageWriter.WriteLineAsync(JsonSerializer.Serialize(record,SpoolJson).AsMemory(),readToken);
+                            if(actual%250==0)progress?.Invoke($"검사 {plan.Inspection} · 연속 조회로 이미지 원본 {actual:N0}/{expected:N0}개 읽는 중");
+                        }
                     }
-                },token);
+                }
+                if(images)await snapshot.StreamInspectionPayloadsAsync(profile,plan.Database,plan.Inspection,Consume,token);
+                else await snapshot.StreamInspectionAsync(profile,plan.Database,plan.Inspection,Consume,token);
                 await rowsWriter.FlushAsync(token);
             }
             if(expected!=actual)throw new InvalidDataException($"패널 metadata 행수 불일치: expected={expected}, actual={actual}. 임시 자료를 보존했습니다.");
             token.ThrowIfCancellationRequested();File.Move(rowsPending,rowsFile,false);
-            string? imagesFile=null;
-            if(images)
+            if(imageWriter is not null&&imagesFile is not null)
             {
-                imagesFile=Path.Combine(stageFolder,"images.jsonl");string imagesPending=imagesFile+".partial";
-                await using(var imageWriter=new StreamWriter(new FileStream(imagesPending,FileMode.CreateNew,FileAccess.Write,FileShare.Read,65536,true),new UTF8Encoding(false)))
-                {
-                    long ordinal=0;
-                    // The DB reader above is closed before ImageAsync runs on the same snapshot connection.
-                    await foreach(var row in ReadSpoolRowsAsync(rowsFile,token))
-                    {
-                        token.ThrowIfCancellationRequested();ordinal++;StoredImage record;
-                        try
-                        {
-                            var payload=await snapshot.ImageAsync(profile,row.Key(profile.Identity,BrowseLevel.Defects),token);
-                            if(payload is null||payload.Bytes.Length==0)record=new(ordinal,row.Text("defects"),"not_recorded",null,0,0,0,0,"DB 이미지 미기록 또는 0바이트");
-                            else
-                            {
-                                string name=ordinal.ToString("D12",System.Globalization.CultureInfo.InvariantCulture)+".bytea",path=Path.Combine(stageFolder,name),pending=path+".partial";
-                                await using(var file=new FileStream(pending,FileMode.CreateNew,FileAccess.Write,FileShare.Read,65536,true))await file.WriteAsync(payload.Bytes,token);
-                                token.ThrowIfCancellationRequested();File.Move(pending,path,false);
-                                record=new(ordinal,row.Text("defects"),"staged",name,payload.Width,payload.Height,payload.Channels,payload.Bytes.LongLength,null);
-                            }
-                        }
-                        catch(Exception ex) when(ex is not OperationCanceledException)
-                        {
-                            record=new(ordinal,row.Text("defects"),"failed",null,0,0,0,0,ex.Message);await failure(row,"이미지 원본 읽기/임시 저장",ex);
-                        }
-                        await imageWriter.WriteLineAsync(JsonSerializer.Serialize(record,SpoolJson).AsMemory(),token);
-                        if(ordinal%250==0)progress?.Invoke($"검사 {plan.Inspection} · 패널 snapshot에서 이미지 원본 {ordinal:N0}/{expected:N0}개 읽는 중");
-                    }
-                    if(ordinal!=expected)throw new InvalidDataException("이미지 임시 목록과 metadata 행수가 다릅니다.");
-                    await imageWriter.FlushAsync(token);
-                }
-                token.ThrowIfCancellationRequested();File.Move(imagesPending,imagesFile,false);
+                await imageWriter.FlushAsync(token);await imageWriter.DisposeAsync();
+                token.ThrowIfCancellationRequested();File.Move(imagesFile+".partial",imagesFile,false);
             }
             staged=new(inspection,detail,layerDetail,captured,DateTimeOffset.MinValue,stageFolder,rowsFile,imagesFile,expected,barCounts,punchUnits.Order().ToArray(),unknownPunch);
         },ct);
@@ -187,7 +182,7 @@ public static class InspectionBundleExporter
         var sidecarContributions=new List<HandlerSidecars.LayerContribution>();
         var destinations=new HashSet<string>(StringComparer.OrdinalIgnoreCase);var snapshots=new List<object>();var selectionSnapshots=new List<object>();
         var geometry=new Dictionary<string,ModelGeometry>(StringComparer.Ordinal);var geometryErrors=new Dictionary<string,string>(StringComparer.Ordinal);var geometryReadAt=new Dictionary<string,DateTimeOffset>(StringComparer.Ordinal);
-        string planFile=Path.Combine(root,"패널목록.jsonl"),snapshotFile=Path.Combine(root,"패널조회시점.jsonl"),spoolRoot=Path.Combine(root,"_내보내기임시");
+        string planFile=Path.Combine(root,"패널목록.jsonl"),snapshotFile=Path.Combine(root,"패널조회시점.jsonl"),spoolRoot=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Synapse","NasExplorer","ExportSpool",Guid.NewGuid().ToString("N"));
         await using var log=new StreamWriter(Path.Combine(root,"처리내역.jsonl"),false,new UTF8Encoding(true)){AutoFlush=true};
         await using var snapshotLog=new StreamWriter(snapshotFile,false,new UTF8Encoding(true)){AutoFlush=true};
         await using var counts=options.Counts?new StreamWriter(Path.Combine(root,"패널별불량수.csv"),false,new UTF8Encoding(true)):null;
@@ -248,7 +243,7 @@ public static class InspectionBundleExporter
                 string stageFolder=Path.Combine(spoolRoot,Guid.NewGuid().ToString("N"));StagedPanel staged;
                 try
                 {
-                    staged=await StagePanelAsync(repository,profile,plan,stageFolder,options.Images,Failure,progress,ct);
+                    staged=await StagePanelAsync(repository,profile,plan,stageFolder,options.Images,progress,ct);
                     var stamp=new{database=plan.Database,inspection=plan.Inspection,capturedAt=staged.CapturedAt,snapshotEndedAt=staged.SnapshotEndedAt,scope="패널 metadata·판정·이미지 원본",rawRows=staged.Expected};
                     snapshotCount++;if(snapshots.Count<1000)snapshots.Add(stamp);
                     await snapshotLog.WriteLineAsync(JsonSerializer.Serialize(stamp));
@@ -320,7 +315,7 @@ public static class InspectionBundleExporter
                             {
                                 missing++;panelMissing++;await log.WriteLineAsync(JsonSerializer.Serialize(new{database=inspection.Database,inspection=id,defect=image.Defect,artifact="image",status="not_recorded",reason=image.Error}));continue;
                             }
-                            if(image.Status=="failed"){completeSpoolUse=false;continue;}
+                            if(image.Status=="failed"){completeSpoolUse=false;await Failure(row,"이미지 원본 읽기/임시 저장",new IOException(image.Error));continue;}
                             try
                             {
                                 if(image.Payload is null||Path.GetFileName(image.Payload)!=image.Payload||image.Bytes is <0 or >int.MaxValue)throw new InvalidDataException("이미지 임시 파일 정보가 올바르지 않습니다.");
@@ -366,7 +361,7 @@ public static class InspectionBundleExporter
         finally
         {
             if(status=="completed")status=failures>0?"partial_failure":unrecoverable>0?"completed_with_limitations":"completed";
-            await File.WriteAllTextAsync(Path.Combine(root,"내보내기결과.json"),JsonSerializer.Serialize(new{status,selectionComplete,plannedPanels=planned,panels,defects,ertFiles=erts,images,missingImages=missing,failures,sidecarFiles,unrecoverable,consistency,selectionSnapshots,snapshots,snapshotCount,snapshotSamplesTruncated=snapshotCount>snapshots.Count,snapshotManifest=Path.GetFileName(snapshotFile),selectionManifest=Path.GetFileName(planFile),retainedSpoolDirectory=Directory.Exists(spoolRoot)?Path.GetFileName(spoolRoot):null,endedAt=DateTimeOffset.Now,modelConsistency="패널 snapshot 해제 후 조회한 모델 DB 별도 스냅샷. 검사 당시 모델을 보장하지 않음.",history="동일 장비/모델/LOT/Layer/패널의 추가 검사 기록은 _검사이력 하위에 보존"},new JsonSerializerOptions{WriteIndented=true}),CancellationToken.None);
+            await File.WriteAllTextAsync(Path.Combine(root,"내보내기결과.json"),JsonSerializer.Serialize(new{status,selectionComplete,plannedPanels=planned,panels,defects,ertFiles=erts,images,missingImages=missing,failures,sidecarFiles,unrecoverable,consistency,selectionSnapshots,snapshots,snapshotCount,snapshotSamplesTruncated=snapshotCount>snapshots.Count,snapshotManifest=Path.GetFileName(snapshotFile),selectionManifest=Path.GetFileName(planFile),retainedSpoolDirectory=Directory.Exists(spoolRoot)?spoolRoot:null,endedAt=DateTimeOffset.Now,modelConsistency="패널 snapshot 해제 후 조회한 모델 DB 별도 스냅샷. 검사 당시 모델을 보장하지 않음.",history="동일 장비/모델/LOT/Layer/패널의 추가 검사 기록은 _검사이력 하위에 보존"},new JsonSerializerOptions{WriteIndented=true}),CancellationToken.None);
         }
         return new(status,panels,defects,erts,images,missing,failures,sidecarFiles,unrecoverable);
     }
