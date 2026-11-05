@@ -266,9 +266,9 @@ public partial class MainWindow
             var dialog=new BundleWindow(1,BrowseLevel.Layers,null,"Layer 1개");
             var body=(StackPanel)((ScrollViewer)dialog.Content).Content;
             var controls=body.Children.OfType<CheckBox>().ToArray();Assert(controls.Length==4&&controls.Count(x=>x.IsChecked==true)==2);
-            controls.Single(x=>Convert.ToString(x.Content)!.StartsWith("Bar result")).IsChecked=true;
+            controls.Single(x=>Convert.ToString(x.Content)!.StartsWith("Bar_result")).IsChecked=true;
             Assert(dialog.Options.BarResult&&!dialog.Options.DefectPoint&&!dialog.Options.HandlerFiles&&!dialog.Options.Counts);
-            controls.Single(x=>Convert.ToString(x.Content)!.StartsWith("Defect count")).IsChecked=true;Assert(dialog.Options.BarResult&&dialog.Options.DefectPoint);dialog.Close();
+            controls.Single(x=>Convert.ToString(x.Content)!.StartsWith("Defect Point")).IsChecked=true;Assert(dialog.Options.BarResult&&dialog.Options.DefectPoint);dialog.Close();
             await ShowDemoAsync();SearchText.Text="agsd";await SearchGlobalAsync();SetVisibleChecks(true);
             string root=Path.Combine(folder,"no-db-optional");await RunAsync(ct=>RunBundleAsync(root,CreateBundleScopes(BundleMode.Checked,null),new(false,false,false,false,BarResult:true,DefectPoint:true),ct),true);
             var files=Directory.GetFiles(root,"*",SearchOption.AllDirectories);Assert(files.Length==2&&files.Any(x=>Path.GetFileName(x)=="Bar_result_agsd.txt")&&files.Any(x=>Path.GetFileName(x).StartsWith("Defect Point_")));
