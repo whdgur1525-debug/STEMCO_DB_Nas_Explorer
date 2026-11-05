@@ -53,7 +53,7 @@ public partial class MainWindow
             var dialog=new BundleWindow(1,BrowseLevel.Layers,null,"Layer 1개"){Left=-20000,Top=-20000,WindowStartupLocation=WindowStartupLocation.Manual,ShowInTaskbar=false,ShowActivated=false};dialog.Show();
             await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.ApplicationIdle);dialog.UpdateLayout();
             var body=(StackPanel)((ScrollViewer)dialog.Content).Content;var bar=body.Children.OfType<CheckBox>().Single(x=>Convert.ToString(x.Content)!.StartsWith("Bar_result"));
-            Assert(System.Windows.Automation.AutomationProperties.GetName(bar).StartsWith("Bar_result"));
+            Assert(System.Windows.Automation.Peers.UIElementAutomationPeer.CreatePeerForElement(bar)!.GetName()==Convert.ToString(bar.Content));
             Assert(VisualDescendants(bar).OfType<TextBlock>().Any(x=>x.Text.StartsWith("Bar_result")&&x.Text.Contains("NO_DB")));dialog.Close();
         });
     }
