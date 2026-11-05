@@ -1,4 +1,4 @@
-﻿Synapse NAS Explorer 0.3.2 — 현장 ERT·반출·탐색 개선
+﻿Synapse NAS Explorer 0.3.3 — NO_DB 추가 파일 개별 선택
 
 C# WPF Windows x64 프로그램. VS2022에서 AOI-NasExplorer.sln을 열어 직접 수정할 수 있습니다.
 개발 호환: .NET9 / 런타임 포함 배포: .NET10. 빌드 스크립트는 PowerShell7 tools/Build.ps1.
@@ -31,8 +31,10 @@ NAS PostgreSQL 조회만 사용하며 Handler/Vision/장비동작/다모/MES/복
   새 검색은 탐색하던 폴더 제한을 풀되 새로 바꾼 상세 Model/LotID/Layer 값은 반영합니다.
 - 조건 초기화는 선택한 DB를 유지합니다. 새 연결에 성공하면 이전 연결의 조건·체크·원본 Index를 초기화합니다.
 - 작은 창에서는 상세 조건과 경로에 스크롤을 제공하고 조건 적용 후 상세 입력을 접어 목록을 확보합니다.
-- 중앙의 내보내기에서 체크 범위/검색 전체/현재 불량 패널 전체를 선택하고
-  ERT / 불량 이미지 / Defect count(패널·바 CSV) / 불량 상세 CSV를 조합합니다.
+- 중앙 내보내기에서 체크 범위/검색 전체/현재 불량 패널 전체를 선택합니다.
+  기본 체크는 ERT와 불량 이미지 두 개입니다.
+  Bar result(NO_DB 폐기 바 .txt), Defect count(NO_DB Defect Point .txt)는 각각 직접 보이는 선택 옵션이며 기본은 꺼져 있습니다.
+  추가 자료를 펼치면 별도 집계 CSV/불량 상세 CSV/기타 NO_DB 파일/과거 검사 포함을 선택합니다.
 - 모델·LOT·Layer 체크는 폴더 전체 의미입니다. 날짜·장비·패널·불량 조건으로 그 폴더의 내용을 자르지 않습니다.
   검색 전체는 원래 검색조건으로 부모 항목을 먼저 정하고, 해당 부모의 모든 패널을 저장합니다.
   특정 날짜/패널만 저장하려면 패널 검사 목록에서 해당 검사들을 체크합니다.
@@ -50,8 +52,16 @@ NAS PostgreSQL 조회만 사용하며 Handler/Vision/장비동작/다모/MES/복
 - 원본 JSON/현재 목록 CSV/ERT 미리보기는 목록 우클릭 메뉴에서 사용할 수 있습니다.
 - 불량 목록 우클릭의 '체크한 불량 이미지 저장'은 체크한 이미지들만 저장합니다.
   중앙 내보내기의 '체크한 불량이 속한 패널 전체'와 구분합니다. 열람 이미지 위 우클릭으로 한 장도 저장합니다.
-- Handler 보조 파일은 별도 선택입니다. DB 폐기마스크는 block_dispose.txt로, 확인된 펀치 증거는
-  Layer/punch.json으로 모읍니다. 바 결과는 선택 범위의 마스크·번호 변환이 확인될 때만 만듭니다.
+- Bar result는 Bar_result_<LOT>.txt입니다. NO_DB의 Panel No,MaskingBar와 MES 번호 규칙을 사용합니다.
+  마스크 0은 헤더만 생성하며, NULL·현재 모델과 맞지 않는 마스크는 정상으로 추정하지 않고 사유를 남깁니다.
+- Defect count는 Defect Point_<Model>_<LOT>_<Layer>_<레이어>_<공정>_<장비>.txt입니다.
+  NO_DB 16열 형식이며 ERT 칸은 선택 검사 전체의 실제 snapshot 행수입니다.
+  DB에 기록되지 않은 Handler eq/vms/autoPass/NG·판정은 빈칸으로 보존합니다. 같은 DB 행수를 세 칸에 복제하지 않습니다.
+  Total은 선택 범위이며 과거 검사 포함 시 같은 패널의 재검 기록도 누적합니다. T/T는 기록된 Handler T/T의 평균입니다.
+  Handler T/T 미기록을 별도 스캔시간으로 대체하지 않습니다. 해상도는 현재 모델 DB 기준, 조회 불가 시 공란입니다.
+  집계 파일 선택만으로 ERT·이미지·CSV·폐기 마스크·펀치 파일이 함께 생성되지는 않습니다.
+- 기타 NO_DB 파일은 별도 선택입니다. DB 폐기마스크는 block_dispose.txt로, 확인된 펀치 증거는
+  Layer/punch.json으로 모읍니다. Bar result 옵션과 독립입니다.
   현재 Layer 재검 표식은 과거 RETEST.INI로 만들지 않고 이 PC의 진단 기록에만 보관합니다.
 
 실시간 수집과 함께 사용하기
@@ -93,7 +103,7 @@ NAS PostgreSQL 조회만 사용하며 Handler/Vision/장비동작/다모/MES/복
 - 기존 PostgreSQL 서비스/운영 NAS는 테스트 대상으로 임의 조작하지 않습니다.
 
 검증과 남은 업무
-- 이 문서는 0.3.2 현장 피드백 개선본 기준입니다. 제공 NO_DB ERT의 직렬화와 최신 Data Transfer를 독립 대조했습니다.
+- 이 문서는 0.3.3 현장 피드백 개선본 기준입니다. 제공 NO_DB ERT의 직렬화와 최신 Data Transfer를 독립 대조했습니다.
 - 별도 GUI 검토 채팅/독립 반례 하네스/10클라이언트 공존 부하 시험의 증거를 함께 보존합니다.
 - 실제 NAS/현장 CAM·VMS·Handler 동시 동작과 실제 원본 모델 ERT는 로컬 합성 시험과 별개입니다.
 - 장시간 방치/자동 갱신·접속 예산·패널별 스냅샷·연속 이미지 조회의 검증 범위는 별도 보고서에 기록합니다.

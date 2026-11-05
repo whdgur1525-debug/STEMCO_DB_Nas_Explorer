@@ -1,4 +1,4 @@
-using System.Data;
+﻿using System.Data;
 using System.IO;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -179,7 +179,7 @@ public partial class MainWindow
             });
             _lastDiagnosticFolder=result.DiagnosticFolder;Log("내보내기 작업 기록: "+result.DiagnosticFolder);
             string state=result.Status switch{"completed"=>"완료","completed_with_limitations"=>"완료 · 복원 제한 있음","partial_failure"=>"일부 실패","empty"=>"해당 패널 없음",_=>result.Status};
-            SetOutput(root,$"내보내기 {state} · 패널 {result.Panels:N0}개 / 불량 {result.Defects:N0}건 / ERT {result.ErtFiles:N0}개 / 이미지 {result.Images:N0}개 / 이미지 미기록 {result.MissingImages:N0}건 / 실패 {result.Failures:N0}건 · 자세한 내용은 작업 기록",true);
+            SetOutput(root,$"내보내기 {state} · 패널 {result.Panels:N0}개 / 불량 {result.Defects:N0}건 / ERT {result.ErtFiles:N0}개 / 이미지 {result.Images:N0}개 (미기록 {result.MissingImages:N0}건) / Bar result {result.BarResultFiles:N0}개 / Defect count {result.DefectPointFiles:N0}개 / 미기록 정보 {result.Unrecoverable:N0}항목 / 실패 {result.Failures:N0}건 · 자세한 내용은 작업 기록",true);
             ExportProgressLabel.Text=Notice.Text;
         }
         catch(Exception ex){_lastOutput=root;if(ex.Data["DiagnosticFolder"] is string diagnostics){_lastDiagnosticFolder=diagnostics;DiagnosticButton.IsEnabled=true;Log("내보내기 작업 기록: "+diagnostics);}throw;}

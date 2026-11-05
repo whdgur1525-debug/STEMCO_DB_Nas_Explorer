@@ -4,10 +4,10 @@ using Aoi.NasExplorer.Core;
 
 namespace Aoi.NasExplorer.Export;
 
-public sealed record BundleOptions(bool Ert,bool Images,bool Counts,bool DefectCsv,bool ModelLayerLot=false,bool HandlerFiles=false,bool IncludeHistory=false);
+public sealed record BundleOptions(bool Ert,bool Images,bool Counts,bool DefectCsv,bool ModelLayerLot=false,bool HandlerFiles=false,bool IncludeHistory=false,bool BarResult=false,bool DefectPoint=false);
 public sealed record BundleScope(string Database,SearchFilter Filter,BrowseLevel Level=BrowseLevel.Inspections,bool ExpandQuery=false);
 public sealed record BundleResult(string Status,long Panels,long Defects,long ErtFiles,long Images,long MissingImages,long Failures,long SidecarFiles=0,long Unrecoverable=0)
-{ public string DiagnosticFolder {get;init;}=""; }
+{ public string DiagnosticFolder {get;init;}="";public long BarResultFiles {get;init;}public long DefectPointFiles {get;init;} }
 public sealed record BundleProgress(string Phase,long PlannedPanels,long ProcessedPanels,long Defects,long Images,long CurrentPanelImages=0,long CurrentPanelExpected=0);
 public sealed record BundlePlanSummary(long PlannedPanels,string DiagnosticFolder)
 { public IReadOnlyList<string> Folders {get;init;}=Array.Empty<string>();public long FolderCount {get;init;}public long UnknownIdentityPanels {get;init;} }
@@ -61,6 +61,7 @@ public static class InspectionBundleExporter
         }while(more);
     }
 
+    private sealed record DefectPointContribution(string LayerFolder,string Model,string Lot,string Layer,string Machine,string ProcessCode,DefectPointPanel Panel);
     private sealed record PhysicalPanel(string Machine,string Model,string Lot,string Layer,long Panel);
     private sealed record PanelReference(string Database,string Inspection,PhysicalPanel? Physical=null,DateTime? Time=null,bool Explicit=false);
     private static PanelReference PlanReference(ResultRow row,bool explicitInspection)
@@ -203,7 +204,7 @@ public static class InspectionBundleExporter
         Func<ResultRow,ImagePayload,string,CancellationToken,Task<string>> saveImage,Action<string>? progress,CancellationToken ct,Action<BundleProgress>? detailedProgress=null,
         Func<BundlePlanSummary,CancellationToken,Task<bool>>? confirmPlan=null)
     {
-        if(!options.Ert&&!options.Images&&!options.Counts&&!options.DefectCsv&&!options.HandlerFiles)throw new ArgumentException("저장할 항목을 하나 이상 선택하세요.");
+        if(!options.Ert&&!options.Images&&!options.Counts&&!options.DefectCsv&&!options.HandlerFiles&&!options.BarResult&&!options.DefectPoint)throw new ArgumentException("저장할 항목을 하나 이상 선택하세요.");
         Directory.CreateDirectory(root);DateTimeOffset started=DateTimeOffset.Now;
         string jobId=started.ToString("yyyyMMdd_HHmmss",System.Globalization.CultureInfo.InvariantCulture)+"_"+Guid.NewGuid().ToString("N");
         // Operator result folders contain only requested artifacts. All provenance and diagnostics stay on this PC.
@@ -211,8 +212,9 @@ public static class InspectionBundleExporter
         Directory.CreateDirectory(diagnosticFolder);
         const string consistency="시작 시 내보낼 검사 Index 목록을 고정. 각 패널의 metadata·판정·이미지 원본은 동일한 패널별 snapshot. 패널 간 기준시각은 다를 수 있음. DB snapshot 해제 뒤 PNG/ERT/CSV 생성.";
         await ExportService.WriteNewAsync(Path.Combine(diagnosticFolder,"내보내기조건.json"),JsonSerializer.Serialize(new{outputDirectory=Path.GetFullPath(root),options,scopes,startedAt=started,consistency,scope="선택한 모델/LOT/레이어의 패널별 최신 검사. 명시 선택한 검사와 식별·시각 미기록 검사는 보존. 과거 검사 포함은 별도 옵션. 불량 검색조건과 PC 제한을 적용하지 않음."},new JsonSerializerOptions{WriteIndented=true}),ct);
-        long panels=0,defects=0,erts=0,images=0,missing=0,failures=0,planned=0,snapshotCount=0,sidecarFiles=0,unrecoverable=0;string status="completed";bool selectionComplete=false;
+        long panels=0,defects=0,erts=0,images=0,missing=0,failures=0,planned=0,snapshotCount=0,sidecarFiles=0,unrecoverable=0,barResultFiles=0,defectPointFiles=0;string status="completed";bool selectionComplete=false;
         var sidecarContributions=new List<HandlerSidecars.LayerContribution>();
+        var defectPointContributions=new List<DefectPointContribution>();
         var destinations=new HashSet<string>(StringComparer.OrdinalIgnoreCase);var snapshots=new List<object>();var selectionSnapshots=new List<object>();
         var geometry=new Dictionary<string,ModelGeometry>(StringComparer.Ordinal);var geometryErrors=new Dictionary<string,string>(StringComparer.Ordinal);var geometryReadAt=new Dictionary<string,DateTimeOffset>(StringComparer.Ordinal);
         string planFile=Path.Combine(diagnosticFolder,"패널목록.jsonl"),snapshotFile=Path.Combine(diagnosticFolder,"패널조회시점.jsonl"),spoolRoot=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Synapse","NasExplorer","ExportSpool",jobId);
@@ -227,6 +229,7 @@ public static class InspectionBundleExporter
         async Task RecordSidecarsAsync(HandlerSidecars.Outcome outcome,ResultRow? row)
         {
             sidecarFiles+=outcome.SavedFiles.Count;unrecoverable+=outcome.Unrecoverable.Count;
+            barResultFiles+=outcome.SavedFiles.Count(path=>Path.GetFileName(path).StartsWith("Bar_result_",StringComparison.OrdinalIgnoreCase));
             await log.WriteLineAsync(JsonSerializer.Serialize(new{database=row?.Database,inspection=row?.Text("inspection"),artifact="handler_sidecars",savedFiles=outcome.SavedFiles,notRequired=outcome.NotRequired,unrecoverable=outcome.Unrecoverable,failures=outcome.Failures,sourceNotes=outcome.SourceNotes},SpoolJson));
             foreach(var reason in outcome.Failures)await Failure(row,reason.Artifact,new IOException(reason.Message));
         }
@@ -342,13 +345,24 @@ public static class InspectionBundleExporter
                     await ExportService.WriteNewAsync(Path.Combine(panelDiagnosticFolder,number+".inspection.json"),ExportService.Json(new(){Database=inspection.Database,Values=new(inspection.Values)
                     { ["snapshot_at"]=staged.CapturedAt,["snapshot_ended_at"]=staged.SnapshotEndedAt,["inspection_fields"]=detail.Values,["current_layer_fields"]=layerDetail?.Values,["layer_metadata_scope"]="패널 조회 시점의 레이어 현재값. 검사 당시 재검 회차를 보장하지 않음.",["consistency"]=consistency}}),ct);
                     ModelGeometry? model=null;string modelKey=inspection.Text("model_name")+"_Layer"+inspection.Text("layer_name");
-                    if(options.Ert||options.HandlerFiles&&detail.Long("disposed_bar_mask")>0)
+                    if(options.Ert||options.DefectPoint||options.BarResult&&detail.Long("disposed_bar_mask")>0)
                     {
                         if(!geometry.TryGetValue(modelKey,out model)&&!geometryErrors.ContainsKey(modelKey))
                         {
                             try{model=await repository.GeometryAsync(profile,inspection.Text("model_name"),inspection.Text("layer_name"),ct);geometry[modelKey]=model;geometryReadAt[modelKey]=DateTimeOffset.Now;}
                             catch(Exception ex) when(ex is not OperationCanceledException){geometryErrors[modelKey]=ex.Message;}
                         }
+                    }
+                    if(options.DefectPoint)
+                    {
+                        static double? NonNegative(double? value)=>value is double d&&double.IsFinite(d)&&d>=0?d:null;
+                        double? tact=NonNegative(detail.Number("handler_tact_sec"));
+                        string process=layerDetail?.Text("vms_process_code").Trim()??"";
+                        var countPanel=new DefectPointPanel(inspection.Long("panel_no")??throw new InvalidDataException("패널 번호 미기록"),staged.Expected,
+                            FovCount:detail.Long("fov_count"),Resolution:model?.Resolution,TactSeconds:tact);
+                        // Counts follow the whole selected scope, including explicitly requested history.
+                        // A historical panel's ERT/PNG may live in _검사이력, while the layer count file retains all selected rows.
+                        defectPointContributions.Add(new(LayerFolder(root,inspection,options.ModelLayerLot),inspection.Text("model_name"),inspection.Text("lot_id_name"),inspection.Text("layer_name"),inspection.Text("machine_id"),process,countPanel));
                     }
                     if(options.Ert)
                     {
@@ -366,12 +380,12 @@ public static class InspectionBundleExporter
                         }
                     }
                     if(options.DefectCsv)await ExportService.CsvAsync(Path.Combine(panelFolder,"불량목록.csv"),ReadSpoolRowsAsync(staged.RowsFile,ct),ct);
-                    if(options.HandlerFiles)
+                    if(options.HandlerFiles||options.BarResult)
                     {
-                        var outcome=await HandlerSidecars.PreparePanelAsync(folder,panelFolder,inspection,detail,layerDetail,staged.RecordedPunchUnits,model,ct);
+                        var outcome=await HandlerSidecars.PreparePanelAsync(folder,panelFolder,inspection,detail,layerDetail,staged.RecordedPunchUnits,model,ct,options.HandlerFiles,options.BarResult);
                         if(outcome.Contribution is not null)sidecarContributions.Add(outcome.Contribution);
                         await RecordSidecarsAsync(outcome,inspection);
-                        if(staged.UnknownPunchUnit)
+                        if(options.HandlerFiles&&staged.UnknownPunchUnit)
                         {unrecoverable++;await log.WriteLineAsync(JsonSerializer.Serialize(new{database=inspection.Database,inspection=id,artifact="punch.json",status="unrecoverable",reason="펀치 증거가 있으나 원본 unit_idx가 미기록 또는 지원 정수 범위 밖입니다."}));}
                     }
                     if(options.Images&&staged.ImagesFile is not null)
@@ -429,7 +443,22 @@ public static class InspectionBundleExporter
                 {await Failure(inspection,"패널 파일 생성",ex);await log.WriteLineAsync(JsonSerializer.Serialize(new{database=inspection.Database,inspection=id,status="spool_retained",stageFolder=staged.Folder}));}
             }
             foreach(var group in sidecarContributions.GroupBy(x=>x.LayerFolder,StringComparer.OrdinalIgnoreCase))
-                await RecordSidecarsAsync(await HandlerSidecars.FinalizeLayerAsync(group.ToArray(),ct,Path.Combine(diagnosticFolder,"레이어참고",ExportService.SafeComponent(group.Key))),null);
+                await RecordSidecarsAsync(await HandlerSidecars.FinalizeLayerAsync(group.ToArray(),ct,Path.Combine(diagnosticFolder,"레이어참고",ExportService.SafeComponent(group.Key)),options.HandlerFiles,options.BarResult),null);
+            foreach(var group in defectPointContributions.GroupBy(x=>(x.LayerFolder,x.Model,x.Lot,x.Layer,x.Machine,x.ProcessCode)))
+            {
+                ct.ThrowIfCancellationRequested();
+                try
+                {
+                    var key=group.Key;
+                    var document=DefectPointExporter.Render(key.Model,key.Lot,key.Layer,key.Machine,key.ProcessCode,group.Select(x=>x.Panel).ToArray());
+                    string path=Path.Combine(key.LayerFolder,document.FileName);
+                    await ExportService.WriteNewAsync(path,document.Text,ct,new UTF8Encoding(false));sidecarFiles++;defectPointFiles++;
+                    if(document.HasMissingFields)unrecoverable++;
+                    await log.WriteLineAsync(JsonSerializer.Serialize(new{artifact="defect_point",path,rows=group.Count(),hasMissingFields=document.HasMissingFields,notes=document.Notes,
+                        resolutionSource="현재 Model DB의 해상도이며 검사 당시 모델과 같음을 보장하지 않음. 모델 조회 불가시 공란.",tactSource="기록된 handler_tact_sec만 사용. 별도 스캔 tact_ms로 대체하지 않음.",scope="선택한 검사 기록 전체. 과거 검사 포함시 같은 패널의 추가 기록도 누적. 장비 원본 카운터 미기록은 빈칸이며 DB COUNT로 대체하지 않음."}));
+                }
+                catch(Exception error) when(error is not OperationCanceledException){await Failure(null,"Defect Point",error);}
+            }
             if(panels==0&&failures==0)status="empty";
             if(Directory.Exists(spoolRoot)&&!Directory.EnumerateFileSystemEntries(spoolRoot).Any())Directory.Delete(spoolRoot,false);
         }
@@ -445,9 +474,9 @@ public static class InspectionBundleExporter
                 {await Failure(null,"불량 수 CSV 마무리",error);}
             }
             if(status=="completed")status=failures>0?"partial_failure":unrecoverable>0?"completed_with_limitations":"completed";
-            await File.WriteAllTextAsync(Path.Combine(diagnosticFolder,"내보내기결과.json"),JsonSerializer.Serialize(new{status,outputDirectory=Path.GetFullPath(root),selectionComplete,plannedPanels=planned,panels,defects,ertFiles=erts,images,missingImages=missing,failures,sidecarFiles,unrecoverable,consistency,selectionSnapshots,snapshots,snapshotCount,snapshotSamplesTruncated=snapshotCount>snapshots.Count,snapshotManifest=Path.GetFileName(snapshotFile),selectionManifest=Path.GetFileName(planFile),retainedSpoolDirectory=Directory.Exists(spoolRoot)?spoolRoot:null,endedAt=DateTimeOffset.Now,modelConsistency="패널 snapshot 해제 후 조회한 모델 DB 별도 스냅샷. 검사 당시 모델을 보장하지 않음.",history="동일 장비/모델/LOT/Layer/패널의 추가 검사 기록은 _검사이력 하위에 보존"},new JsonSerializerOptions{WriteIndented=true}),CancellationToken.None);
+            await File.WriteAllTextAsync(Path.Combine(diagnosticFolder,"내보내기결과.json"),JsonSerializer.Serialize(new{status,outputDirectory=Path.GetFullPath(root),selectionComplete,plannedPanels=planned,panels,defects,ertFiles=erts,images,missingImages=missing,failures,sidecarFiles,barResultFiles,defectPointFiles,unrecoverable,consistency,selectionSnapshots,snapshots,snapshotCount,snapshotSamplesTruncated=snapshotCount>snapshots.Count,snapshotManifest=Path.GetFileName(snapshotFile),selectionManifest=Path.GetFileName(planFile),retainedSpoolDirectory=Directory.Exists(spoolRoot)?spoolRoot:null,endedAt=DateTimeOffset.Now,modelConsistency="패널 snapshot 해제 후 조회한 모델 DB 별도 스냅샷. 검사 당시 모델을 보장하지 않음.",history="동일 장비/모델/LOT/Layer/패널의 추가 검사 기록은 _검사이력 하위에 보존"},new JsonSerializerOptions{WriteIndented=true}),CancellationToken.None);
             detailedProgress?.Invoke(new(status=="completed"||status=="completed_with_limitations"?"completed":status,planned,panels,defects,images));
         }
-        return new(status,panels,defects,erts,images,missing,failures,sidecarFiles,unrecoverable){DiagnosticFolder=diagnosticFolder};
+        return new(status,panels,defects,erts,images,missing,failures,sidecarFiles,unrecoverable){DiagnosticFolder=diagnosticFolder,BarResultFiles=barResultFiles,DefectPointFiles=defectPointFiles};
     }
 }

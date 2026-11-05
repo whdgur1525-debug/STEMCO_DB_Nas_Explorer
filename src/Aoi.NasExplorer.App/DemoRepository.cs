@@ -1,4 +1,4 @@
-using System.Runtime.CompilerServices;
+﻿using System.Runtime.CompilerServices;
 using Aoi.NasExplorer.Core;
 
 namespace Aoi.NasExplorer.App;
@@ -27,7 +27,7 @@ internal sealed class DemoRepository : IExplorerRepository
                 for(int panel=1;panel<=6;panel++)
                 {
                     inspectionId++;var time=new DateTime(2026,11,3,9,15,0).AddSeconds(inspectionId);
-                    var values=new Dictionary<string,object?>{["inspection"]=inspectionId,["lot_id"]=k+1,["layer_id"]=layerId,["model_name"]=model,["lot_id_name"]=lot,["layer_name"]=layer,["machine_id"]="EQ_09",["pc_no"]=0,["panel_no"]=panel,["inspection_time"]=time,["inspection_status"]="VMS_COMPLETED",["handler_tact_sec"]=18.4,["tact_ms"]=13500,["fov_count"]=12,["total_defects"]=12,["stored_defect_count"]=12};
+                    var values=new Dictionary<string,object?>{["inspection"]=inspectionId,["lot_id"]=k+1,["layer_id"]=layerId,["model_name"]=model,["lot_id_name"]=lot,["layer_name"]=layer,["machine_id"]="EQ_09",["pc_no"]=0,["panel_no"]=panel,["inspection_time"]=time,["inspection_status"]="VMS_COMPLETED",["handler_tact_sec"]=18.4,["tact_ms"]=13500,["fov_count"]=12,["total_defects"]=12,["stored_defect_count"]=12,["disposed_bar_mask"]=0};
                     _data[BrowseLevel.Inspections].Add(new(){Database=Db,Values=values});
                     for(int j=1;j<=12;j++)
                     {

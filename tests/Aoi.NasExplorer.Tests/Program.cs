@@ -443,19 +443,66 @@ CREATE TABLE defects(defects uuid PRIMARY KEY,inspection uuid,unit_idx int,unit_
             }
             finally{await Admin(p,db1,"DELETE FROM inspection WHERE inspection IN(777,778);DELETE FROM layer WHERE layer IN(777,778)");}
         });
+        await Check("NO_DB optional Bar result and Defect Point are separate from other exports",async()=>
+        {
+            try
+            {
+                await Admin(p,db1,"UPDATE inspection SET disposed_bar_mask=0,handler_tact_sec=12.3,fov_count=16 WHERE inspection=1");
+                foreach(var choice in new[]{(Bar:true,Point:false),(Bar:false,Point:true),(Bar:true,Point:true)})
+                {
+                    string root=BundleRoot("no-db-options");
+                    var result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){InspectionId="1"})},new(false,false,false,false,BarResult:choice.Bar,DefectPoint:choice.Point),ImageFile,null,default);
+                    Equal(0L,result.Failures);Equal(choice.Bar?1L:0L,result.BarResultFiles);Equal(choice.Point?1L:0L,result.DefectPointFiles);
+                    var files=Directory.GetFiles(root,"*",SearchOption.AllDirectories);Equal((choice.Bar?1:0)+(choice.Point?1:0),files.Length);
+                    True(files.All(x=>Path.GetFileName(x).StartsWith("Bar_result_",StringComparison.Ordinal)||Path.GetFileName(x).StartsWith("Defect Point_",StringComparison.Ordinal)));
+                    if(choice.Point)
+                    {
+                        var lines=await File.ReadAllLinesAsync(files.Single(x=>Path.GetFileName(x).StartsWith("Defect Point_",StringComparison.Ordinal)));
+                        Equal(2,lines.Length);var fields=lines[1].Split(',').Select(x=>x.Trim()).ToArray();Equal(16,fields.Length);Equal("",fields[7]);Equal("1",fields[8]);Equal("",fields[9]);Equal("",fields[10]);Equal("16",fields[13]);Equal("12.3",fields[15]);
+                    }
+                }
+            }
+            finally{await Admin(p,db1,"UPDATE inspection SET disposed_bar_mask=NULL,handler_tact_sec=NULL,fov_count=1 WHERE inspection=1");}
+        });
+        await Check("Defect Point Handler tact is not replaced by unrelated scan time",async()=>
+        {
+            try
+            {
+                await Admin(p,db1,"UPDATE inspection SET handler_tact_sec=NULL,tact_ms=12345 WHERE inspection=1");
+                string root=BundleRoot("count-scan-only");
+                var result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){InspectionId="1"})},new(false,false,false,false,DefectPoint:true),ImageFile,null,default);
+                Equal(0L,result.Failures);string path=Directory.GetFiles(root,"Defect Point_*.txt",SearchOption.AllDirectories).Single();
+                foreach(string line in await File.ReadAllLinesAsync(path))Equal("",line.Split(',')[15].Trim());
+                True((await File.ReadAllTextAsync(Path.Combine(result.DiagnosticFolder,"처리내역.jsonl"))).Contains("resolutionSource"));
+            }
+            finally{await Admin(p,db1,"UPDATE inspection SET handler_tact_sec=NULL,tact_ms=NULL WHERE inspection=1");}
+        });
+        await Check("Defect Point zero-defect missing-model panel remains explicit and produces no invented counters",async()=>
+        {
+            try
+            {
+                await Admin(p,db1,"INSERT INTO inspection(inspection,layer,machine_id,pc_no,panel_no,time,status) VALUES(889,1,'EQ09',0,9,now(),'COMPLETED')");
+                string root=BundleRoot("count-zero");
+                var result=await InspectionBundleExporter.ExportAsync(repo,p with{ModelDatabase="missing_model_for_count"},root,new[]{new BundleScope(db1,new(){InspectionId="889"})},new(false,false,false,false,DefectPoint:true),ImageFile,null,default);
+                Equal(0L,result.Failures);Equal(1L,result.DefectPointFiles);Equal(0L,result.Defects);True(result.Unrecoverable>0);
+                string path=Directory.GetFiles(root,"Defect Point_*.txt",SearchOption.AllDirectories).Single();var values=(await File.ReadAllLinesAsync(path))[1].Split(',').Select(x=>x.Trim()).ToArray();
+                Equal("0",values[8]);foreach(int i in new[]{7,9,10,11,12,13,14,15})Equal("",values[i]);
+            }
+            finally{await Admin(p,db1,"DELETE FROM inspection WHERE inspection=889");}
+        });
         await Check("Handler sidecar-only bundle distinguishes recorded zero from NULL and reports reconstruction limits",async()=>
         {
             try
             {
                 await Admin(p,db1,"UPDATE inspection SET disposed_bar_mask=0 WHERE inspection=1");
                 string root=BundleRoot("handler-zero");
-                var result=await InspectionBundleExporter.ExportAsync(repo,p with{ModelDatabase="missing_model_must_not_be_queried"},root,new[]{new BundleScope(db1,new(){InspectionId="1"})},new(false,false,false,false,HandlerFiles:true),ImageFile,null,default);
-                Equal(0L,result.Failures);True(result.Unrecoverable>0);Equal("completed_with_limitations",result.Status);
+                var result=await InspectionBundleExporter.ExportAsync(repo,p with{ModelDatabase="missing_model_must_not_be_queried"},root,new[]{new BundleScope(db1,new(){InspectionId="1"})},new(false,false,false,false,HandlerFiles:true,BarResult:true),ImageFile,null,default);
+                Equal(0L,result.Failures);Equal(0L,result.Unrecoverable);Equal("completed",result.Status);
                 string layer=Path.Combine(root,"EQ09","MODEL_A","LOT_A","L1");
                 Equal("0",(await File.ReadAllTextAsync(Path.Combine(layer,"1","block_dispose.txt"))).Trim());
                 Equal("Panel No,MaskingBar",(await File.ReadAllTextAsync(Path.Combine(layer,"Bar_result_LOT_A.txt"))).Trim());
                 await Admin(p,db1,"UPDATE inspection SET disposed_bar_mask=NULL WHERE inspection=1");
-                root=BundleRoot("handler-null");result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){InspectionId="1"})},new(false,false,false,false,HandlerFiles:true),ImageFile,null,default);
+                root=BundleRoot("handler-null");result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){InspectionId="1"})},new(false,false,false,false,HandlerFiles:true,BarResult:true),ImageFile,null,default);
                 Equal(0L,result.Failures);True(result.Unrecoverable>0);True(!Directory.GetFiles(root,"block_dispose.txt",SearchOption.AllDirectories).Any());
                 using var receipt=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(result.DiagnosticFolder,"내보내기결과.json")));True(receipt.RootElement.GetProperty("unrecoverable").GetInt64()>0);
             }

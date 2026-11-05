@@ -256,10 +256,23 @@ public partial class MainWindow
         {
             Assert(Navigation.Items.Cast<TreeViewItem>().All(x=>!Convert.ToString(x.Header)!.Contains("즐겨찾기")));
             Assert(Convert.ToString(Results.Columns.Single(x=>x.SortMemberPath=="lot_id").Header)=="Index");
-            var dialog=new BundleWindow(1,BrowseLevel.Lots,null,"LOT 1개 · 패널 전체");Assert(dialog.Mode==BundleMode.Checked&&dialog.Options.Ert&&dialog.Options.Images&&!dialog.Options.Counts&&!dialog.Options.DefectCsv&&!dialog.Options.HandlerFiles&&!dialog.Options.IncludeHistory);
+            var dialog=new BundleWindow(1,BrowseLevel.Lots,null,"LOT 1개 · 패널 전체");Assert(dialog.Mode==BundleMode.Checked&&dialog.Options.Ert&&dialog.Options.Images&&!dialog.Options.Counts&&!dialog.Options.DefectCsv&&!dialog.Options.HandlerFiles&&!dialog.Options.IncludeHistory&&!dialog.Options.BarResult&&!dialog.Options.DefectPoint);
             var scroller=(ScrollViewer)dialog.Content;var body=(System.Windows.FrameworkElement)scroller.Content;scroller.Content=null;dialog.Content=null;body.Margin=new System.Windows.Thickness(0);
             var frame=new Border{Child=body,Background=System.Windows.Media.Brushes.White,Padding=new System.Windows.Thickness(22)};frame.Measure(new System.Windows.Size(650,double.PositiveInfinity));frame.Arrange(new System.Windows.Rect(0,0,650,frame.DesiredSize.Height));frame.UpdateLayout();
             var bitmap=new RenderTargetBitmap(650,(int)Math.Ceiling(frame.ActualHeight),96,96,PixelFormats.Pbgra32);bitmap.Render(frame);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));using(var stream=File.Create(Path.Combine(folder,"내보내기창.png")))encoder.Save(stream);dialog.Close();return Task.CompletedTask;
+        });
+        await Check("NO_DB additional files have independent visible options with only ERT and images on by default",async()=>
+        {
+            var dialog=new BundleWindow(1,BrowseLevel.Layers,null,"Layer 1개");
+            var body=(StackPanel)((ScrollViewer)dialog.Content).Content;
+            var controls=body.Children.OfType<CheckBox>().ToArray();Assert(controls.Length==4&&controls.Count(x=>x.IsChecked==true)==2);
+            controls.Single(x=>Convert.ToString(x.Content)!.StartsWith("Bar result")).IsChecked=true;
+            Assert(dialog.Options.BarResult&&!dialog.Options.DefectPoint&&!dialog.Options.HandlerFiles&&!dialog.Options.Counts);
+            controls.Single(x=>Convert.ToString(x.Content)!.StartsWith("Defect count")).IsChecked=true;Assert(dialog.Options.BarResult&&dialog.Options.DefectPoint);dialog.Close();
+            await ShowDemoAsync();SearchText.Text="agsd";await SearchGlobalAsync();SetVisibleChecks(true);
+            string root=Path.Combine(folder,"no-db-optional");await RunAsync(ct=>RunBundleAsync(root,CreateBundleScopes(BundleMode.Checked,null),new(false,false,false,false,BarResult:true,DefectPoint:true),ct),true);
+            var files=Directory.GetFiles(root,"*",SearchOption.AllDirectories);Assert(files.Length==2&&files.Any(x=>Path.GetFileName(x)=="Bar_result_agsd.txt")&&files.Any(x=>Path.GetFileName(x).StartsWith("Defect Point_")));
+            var lines=await File.ReadAllLinesAsync(files.Single(x=>Path.GetFileName(x).StartsWith("Defect Point_")));Assert(lines.Length==7&&lines[0].Split(',')[8].Trim()=="72"&&lines[0].Split(',')[7].Trim()=="");
         });
         await Check("checked image export writes only checked defects and resets stale image details",async()=>
         {
