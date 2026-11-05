@@ -38,6 +38,7 @@ public partial class MainWindow
     private void InitializeExperience()
     {
         _experienceReady=true;
+        SearchTargetBox.SelectionChanged+=(_,_)=>UpdateSearchHint();UpdateSearchHint();
         AutoRefreshBox.SelectedIndex=_view.RefreshSeconds switch{>0 and <300=>1,>=300=>2,_=>0};
         if(_view.RefreshSeconds>0)_view.RefreshSeconds=Math.Max(60,_view.RefreshSeconds);
         InitializeIdleSession();ScheduleAutoRefresh();
@@ -69,6 +70,15 @@ public partial class MainWindow
         UpdateActions();
     }
     private SearchTarget SelectedTarget()=>SearchTargetBox.SelectedIndex switch{0=>SearchTarget.Lot,1=>SearchTarget.Model,_=>SearchTarget.ModelAndLot};
+    private void UpdateSearchHint()
+    {
+        (SearchHint.Text,SearchText.ToolTip)=SelectedTarget() switch
+        {
+            SearchTarget.Lot=>("LOT 이름의 일부 입력 → 검색 · LOT 선택 → 불량 바로 보기 · 위 경로를 눌러 이전 검색으로 복귀","LOT 이름의 일부를 입력하세요. 예: agsd. 새 검색은 이전 폴더 제한을 해제합니다."),
+            SearchTarget.Model=>("모델 이름의 일부 입력 → 검색 · 모델 선택 → LOT / 패널 / 불량 열기","모델 이름의 일부를 입력하세요. 예: p2411. 새 검색은 이전 폴더 제한을 해제합니다."),
+            _=>("모델명 또는 LOT명에 검색어가 포함된 자료를 찾습니다 · 두 조건을 함께 제한하려면 상세 검색의 모델 / LOT을 입력하세요","검색어 하나를 모델명 또는 LOT명에서 찾습니다. 예: p2411 또는 agsd. 모델과 LOT을 동시에 제한하려면 상세 검색을 사용하세요.")
+        };
+    }
     private SearchFilter CreateSearchFilter()
     {
         var filter=ReadFilter();
@@ -111,9 +121,8 @@ public partial class MainWindow
             await BeginQueryAsync(state.Current.Filter,state.Current.Level,state.Current.Databases,ct,false,state.Trail,state.Current.AllDatabases);
             if(state.SelectedKey is not null)
             {
-                int index=_rows.FindIndex(x=>x.Key(_profile.Identity,_level)==state.SelectedKey);Results.SelectedIndex=index;
-                if(index>=0)Results.ScrollIntoView(Results.SelectedItem);
-                else Notice.Text+=" · 이전 열람 항목은 첫 페이지에 없습니다. 목록에서 다시 선택하세요.";
+                int index=_rows.FindIndex(x=>x.Key(_profile.Identity,_level)==state.SelectedKey);SelectResultAtSourceIndex(index);
+                if(index<0)Notice.Text+=" · 이전 열람 항목은 첫 페이지에 없습니다. 목록에서 다시 선택하세요.";
             }
         });
     }
@@ -147,7 +156,7 @@ public partial class MainWindow
             if(selection is not null)
             {
                 int index=_rows.FindIndex(x=>x.Key(_profile.Identity,_level)==selection);
-                if(index>=0){Results.SelectedIndex=index;Results.ScrollIntoView(Results.SelectedItem);}
+                if(index>=0)SelectResultAtSourceIndex(index);
                 else Notice.Text+=" · 이전 선택은 첫 페이지에 없습니다. 목록에서 다시 선택하세요.";
             }
         });

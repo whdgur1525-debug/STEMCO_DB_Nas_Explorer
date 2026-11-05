@@ -274,6 +274,7 @@ public partial class MainWindow
             var files=Directory.GetFiles(root,"*",SearchOption.AllDirectories);Assert(files.Length==2&&files.Any(x=>Path.GetFileName(x)=="Bar_result_agsd.txt")&&files.Any(x=>Path.GetFileName(x).StartsWith("Defect Point_")));
             var lines=await File.ReadAllLinesAsync(files.Single(x=>Path.GetFileName(x).StartsWith("Defect Point_")));Assert(lines.Length==7&&lines[0].Split(',')[8].Trim()=="72"&&lines[0].Split(',')[7].Trim()=="");
         });
+        await RunUsabilityChecksAsync(Check);
         await Check("checked image export writes only checked defects and resets stale image details",async()=>
         {
             await ShowDemoAsync(true);await Until(()=>_image is not null);
@@ -282,6 +283,7 @@ public partial class MainWindow
             Assert(Directory.GetFiles(root,"*.png",SearchOption.AllDirectories).Length==2);
             using var result=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(_lastDiagnosticFolder!,"결과.json")));
             Assert(result.RootElement.GetProperty("saved").GetInt64()==2&&result.RootElement.GetProperty("selected").GetInt32()==2);
+            Assert(Notice.Text.Contains("체크 이미지 완료")&&Notice.Text.Contains("선택 2개 중 저장 2"));
             await ShowDemoAsync();Assert(!ImageInfo.Text.Contains("16384")&&!ImageInfo.Text.Contains("16,384"));
             UpdateResultContextMenu();Assert(!Results.ContextMenu.Items.OfType<MenuItem>().Single(x=>Convert.ToString(x.Tag)=="ert").IsEnabled);
         });

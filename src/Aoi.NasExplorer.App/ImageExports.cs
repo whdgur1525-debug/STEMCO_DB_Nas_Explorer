@@ -70,7 +70,7 @@ public partial class MainWindow
                     await log.WriteLineAsync(JsonSerializer.Serialize(new{row.Database,id=row.Text("defects"),capturedAt=captured,status="saved",path}));
                 }
                 catch(Exception ex) when(ex is not OperationCanceledException){failed++;await log.WriteLineAsync(JsonSerializer.Serialize(new{row.Database,id=row.Text("defects"),status="failed",error=ex.Message}));}
-                Status.Text=ExportProgressLabel.Text=$"체크 이미지 · 저장 {saved:N0} / 미기록 {missing:N0} / 실패 {failed:N0}";
+                Status.Text=ExportProgressLabel.Text=$"체크 이미지 · 선택 {selected.Count:N0}개 중 저장 {saved:N0} / 미기록 {missing:N0} / 실패 {failed:N0}";
                 ExportProgress.IsIndeterminate=false;ExportProgress.Maximum=Math.Max(1,selected.Count);ExportProgress.Value=saved+missing+failed;
             }
             if(failed>0)status="partial_failure";
@@ -81,7 +81,8 @@ public partial class MainWindow
         {
             await File.WriteAllTextAsync(Path.Combine(diagnostic,"결과.json"),JsonSerializer.Serialize(new{status,outputDirectory=Path.GetFullPath(root),selected=selected.Count,saved,missing,failed,endedAt=DateTimeOffset.Now}),CancellationToken.None);
             Log("체크 이미지 작업 기록: "+diagnostic);
-            SetOutput(root,$"체크 이미지 · 저장 {saved:N0} / 미기록 {missing:N0} / 실패 {failed:N0}",true);
+            string state=status switch{"cancelled"=>"취소됨","partial_failure"=>"일부 실패","failed"=>"실패",_=>missing>0?"완료 · 이미지 미기록 있음":"완료"};
+            SetOutput(root,$"체크 이미지 {state} · 선택 {selected.Count:N0}개 중 저장 {saved:N0} / 미기록 {missing:N0} / 실패 {failed:N0}",true);
         }
     }
 }

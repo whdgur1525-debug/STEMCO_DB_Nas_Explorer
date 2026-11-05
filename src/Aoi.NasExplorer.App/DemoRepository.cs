@@ -44,7 +44,12 @@ internal sealed class DemoRepository : IExplorerRepository
         IEnumerable<ResultRow> rows=_data[level];
         bool Match(ResultRow row)
         {
-            if(f.Text.Length>0&&!(f.Target switch{SearchTarget.Lot=>row.Text("lot_id_name"),SearchTarget.Model=>row.Text("model_name"),_=>row.Text("model_name")+" "+row.Text("lot_id_name")}).Contains(f.Text,StringComparison.OrdinalIgnoreCase))return false;
+            if(f.Text.Length>0&&!(f.Target switch
+            {
+                SearchTarget.Lot=>row.Text("lot_id_name").Contains(f.Text,StringComparison.OrdinalIgnoreCase),
+                SearchTarget.Model=>row.Text("model_name").Contains(f.Text,StringComparison.OrdinalIgnoreCase),
+                _=>row.Text("model_name").Contains(f.Text,StringComparison.OrdinalIgnoreCase)||row.Text("lot_id_name").Contains(f.Text,StringComparison.OrdinalIgnoreCase)
+            }))return false;
             if(f.Model.Length>0&&row.Text("model_name")!=f.Model||f.Lot.Length>0&&row.Text("lot_id_name")!=f.Lot||f.Layer.Length>0&&row.Text("layer_name")!=f.Layer)return false;
             if(f.LotId.Length>0&&row.Text("lot_id")!=f.LotId||f.LayerId.Length>0&&row.Text(level==BrowseLevel.Layers?"layer":"layer_id")!=f.LayerId||f.InspectionId.Length>0&&row.Text("inspection")!=f.InspectionId)return false;
             if(f.Panel.HasValue&&row.Long("panel_no")!=f.Panel||f.Pc.HasValue&&row.Long("pc_no")!=f.Pc)return false;

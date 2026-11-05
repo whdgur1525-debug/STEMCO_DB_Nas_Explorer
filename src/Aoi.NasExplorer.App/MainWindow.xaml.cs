@@ -231,6 +231,7 @@ public partial class MainWindow : Window
     }
     private async Task LoadPageAsync(CancellationToken ct)
     {
+        var selection=Selected()?.Key(_profile.Identity,_level);
         if(_queryDatabases.Count==0){Notice.Text="연결 가능한 검사 DB가 없습니다. NAS 연결과 DB 권한을 확인하세요.";_hasMore=false;return;}
         while(_databaseIndex<_queryDatabases.Count)
         {
@@ -242,6 +243,7 @@ public partial class MainWindow : Window
                 _rows.AddRange(page.Rows);_cursor=page.Cursor;
                 if(!page.HasMore){_databaseIndex++;_cursor=null;}
                 _hasMore=_databaseIndex<_queryDatabases.Count;BindRows();
+                if(selection is not null)SelectResultAtSourceIndex(_rows.FindIndex(row=>row.Key(_profile.Identity,_level)==selection));
                 if(page.Rows.Count>0)break;
             }
             catch(Exception ex) when(ex is not OperationCanceledException)
@@ -252,6 +254,7 @@ public partial class MainWindow : Window
     }
     private void BindRows()
     {
+        RememberResultSort();
         RememberColumns();
         _table=new DataTable();_table.Columns.Add("__index",typeof(int));_table.Columns.Add("source_database",typeof(string));
         _table.Columns.Add("__checked",typeof(bool));
@@ -279,6 +282,7 @@ public partial class MainWindow : Window
             Results.Columns.Add(display);
         }
         Results.ItemsSource=_table.DefaultView;
+        RestoreResultSort();
         UpdateCheckedLabel();
     }
     private ResultRow? Selected()=>Results.SelectedItem is DataRowView r&&ReferenceEquals(r.DataView.Table,_table)&&(int)r["__index"] is int i&&i>=0&&i<_rows.Count?_rows[i]:null;

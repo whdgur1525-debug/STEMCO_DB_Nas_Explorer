@@ -103,14 +103,25 @@ public partial class MainWindow
     {
         if(_idleLocked||_queryCts is not null)return;
         string? panelId=_level==BrowseLevel.Defects?CurrentPanelId():null;
-        int checkedPanels=_checkedRecords.Values.Select(x=>(x.Database,Id:x.Text("inspection"))).Where(x=>x.Id.Length>0).Distinct().Count();
-        var dialog=new BundleWindow(_checkedRecords.Count,_level,panelId,SummaryLabel.Text,checkedPanels,sender is MenuItem{Tag:"panel"}){Owner=this};
+        ResultRow? panelPreview=null;bool cancelled=false;
+        if(panelId is not null)
+        {
+            string? database=_queryDatabases.Count==1?_queryDatabases[0]:Selected()?.Database;
+            if(database is not null)await RunAsync(async ct=>
+            {
+                try{panelPreview=(await _repository.QueryAsync(_profile,database,BrowseLevel.Inspections,new(){InspectionId=panelId},1,null,ct)).Rows.SingleOrDefault();}
+                catch(OperationCanceledException){cancelled=true;throw;}
+                catch(Exception ex){Log("패널 수량 미리보기 실패 · 실제 대상은 다음 화면에서 확인: "+Aoi.NasExplorer.Data.ExplorerRepository.SafeError(ex));}
+            });
+        }
+        if(cancelled||_idleLocked)return;
+        var dialog=CreateBundleWindow(sender is MenuItem{Tag:"panel"},panelPreview);
         if(ShowModal(()=>dialog.ShowDialog())!=true)return;
         List<BundleScope> scopes;
         try{scopes=CreateBundleScopes(dialog.Mode,panelId);}
         catch(Exception ex){Notice.Text="내보내기 범위 확인 실패: "+ex.Message;return;}
         string root=Path.Combine(dialog.Folder,"검사결과_"+DateTime.Now.ToString("yyyyMMdd_HHmmss")+"_"+Guid.NewGuid().ToString("N")[..6]);
-        string description=DescribeBundleSelection(dialog.Mode,scopes,dialog.Options);
+        string description=DescribeBundleSelection(dialog.Mode,scopes,dialog.Options)+"\n\n"+dialog.SelectionDescription;
         await RunAsync(ct=>RunBundleAsync(root,scopes,dialog.Options,ct,plan=>
         {
             ct.ThrowIfCancellationRequested();

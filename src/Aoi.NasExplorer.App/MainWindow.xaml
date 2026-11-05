@@ -9,7 +9,7 @@
    <Button DockPanel.Dock="Right" x:Name="CancelButton" Content="취소" Click="Cancel_Click"/><Button DockPanel.Dock="Right" x:Name="RefreshButton" Content="새로고침" Click="Refresh_Click"/><Button DockPanel.Dock="Right" x:Name="SearchButton" Content="검색" Click="Search_Click" Background="#2563EB" Foreground="White"/>
    <ComboBox x:Name="ScopeBox" Width="205" ToolTip="검색할 DB 범위" DisplayMemberPath="Label"/>
    <ComboBox x:Name="LevelBox" Width="100" SelectedIndex="1" Visibility="Collapsed"><ComboBoxItem Content="모델"/><ComboBoxItem Content="LOT"/><ComboBoxItem Content="레이어"/><ComboBoxItem Content="검사 이력"/><ComboBoxItem Content="불량"/></ComboBox>
-   <ComboBox x:Name="SearchTargetBox" Width="110" SelectedIndex="0"><ComboBoxItem Content="LOT 검색"/><ComboBoxItem Content="모델 검색"/><ComboBoxItem Content="모델 + LOT"/></ComboBox>
+   <ComboBox x:Name="SearchTargetBox" Width="135" SelectedIndex="0"><ComboBoxItem Content="LOT 검색"/><ComboBoxItem Content="모델 검색"/><ComboBoxItem Content="모델 또는 LOT"/></ComboBox>
    <TextBox x:Name="SearchText" MinWidth="160" ToolTip="이름의 일부만 입력해도 됩니다. 예: agsd. 새 검색은 이전 폴더 제한을 해제합니다." KeyDown="SearchText_KeyDown"/>
   </DockPanel><TextBlock x:Name="SearchHint" Text="LOT 이름의 일부 입력 → 검색 · LOT 선택 → 불량 바로 보기 · 위 경로를 눌러 이전 검색으로 복귀" Foreground="#7B8BA3" FontSize="11" Margin="4,5,0,0"/></StackPanel></Border>
   <Border Grid.Row="2" Background="White" BorderBrush="#E1E7EF" BorderThickness="0,0,0,1" Padding="22,0,22,9"><Expander x:Name="DetailSearchExpander" Header="상세 검색 · 기간 / 장비 / 판정 / 측정값" Foreground="#51627D">

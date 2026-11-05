@@ -8,8 +8,21 @@ using Microsoft.Win32;
 namespace Aoi.NasExplorer.App;
 
 internal enum BundleMode { Checked, Query, Panel }
+internal sealed record BundleScopeInfo(string Description,string? ErtIssue=null);
 internal sealed class BundleWindow : Window
 {
+    private Func<BundleMode,BundleScopeInfo>? _scopeInfo;
+    private readonly TextBlock _scopeDescription=new(){TextWrapping=TextWrapping.Wrap,FontSize=12,Margin=new Thickness(4,4,4,6)};
+    private readonly TextBlock _ertIssue=new(){TextWrapping=TextWrapping.Wrap,Foreground=Brushes.DarkOrange,FontSize=12,Margin=new Thickness(4,3,4,6),Visibility=Visibility.Collapsed};
+    internal string SelectionDescription=>_scopeDescription.Text;
+    internal void SetScopeInfo(Func<BundleMode,BundleScopeInfo> provider){_scopeInfo=provider;UpdateScopeDetails();}
+    private void UpdateScopeDetails()
+    {
+        var info=_scopeInfo?.Invoke(Mode);
+        _scopeDescription.Text=info?.Description??(Mode==BundleMode.Panel?"선택 반출 범위: 현재 패널의 검사 기록 전체. 실제 대상은 다음 화면에서 확인합니다.":Mode==BundleMode.Checked?"선택 반출 범위: 체크한 항목 전체. 실제 대상은 다음 화면에서 확인합니다.":"선택 반출 범위: 현재 검색 결과 전체. 실제 대상은 다음 화면에서 확인합니다.");
+        _ertIssue.Text=info?.ErtIssue is string issue?"ERT 확인 필요: "+issue+"\n이미지와 다른 자료는 독립적으로 선택할 수 있습니다.":"";
+        _ertIssue.Visibility=_ert.IsChecked==true&&_ertIssue.Text.Length>0?Visibility.Visible:Visibility.Collapsed;
+    }
     public string Folder=>_folder.Text.Trim();
     public BundleMode Mode=>_panel.IsChecked==true?BundleMode.Panel:_checked.IsChecked==true?BundleMode.Checked:BundleMode.Query;
     public BundleOptions Options=>new(_ert.IsChecked==true,_images.IsChecked==true,_counts.IsChecked==true,_csv.IsChecked==true,_layout.SelectedIndex==1,_handler.IsChecked==true,_history.IsChecked==true,_barResult.IsChecked==true,_defectPoint.IsChecked==true);
@@ -33,9 +46,11 @@ internal sealed class BundleWindow : Window
         var warning=new TextBlock{Text="전체 검색 범위입니다. LOT·Layer가 많으면 이미지 용량과 처리 시간이 커질 수 있습니다. 다음 화면에서 실제 대상 수와 이름을 확인합니다.",TextWrapping=TextWrapping.Wrap,Foreground=Brushes.DarkOrange,Margin=new Thickness(4,5,4,8),Visibility=Visibility.Collapsed};body.Children.Add(warning);
         _query.Checked+=(_,_)=>warning.Visibility=Visibility.Visible;_query.Unchecked+=(_,_)=>warning.Visibility=Visibility.Collapsed;
         if(preferPanel&&panel is not null)_panel.IsChecked=true;else if(checkedCount>0)_checked.IsChecked=true;else if(panel is not null)_panel.IsChecked=true;else _query.IsChecked=true;
-        body.Children.Add(new TextBlock{Text="현재 검색 집계: "+querySummary,TextWrapping=TextWrapping.Wrap,Foreground=Brushes.SlateGray,FontSize=11,Margin=new Thickness(4,2,4,8)});
+        body.Children.Add(new Border{Background=new SolidColorBrush(Color.FromRgb(237,244,255)),Padding=new Thickness(6),Child=new ScrollViewer{Content=_scopeDescription,MaxHeight=125,VerticalScrollBarVisibility=ScrollBarVisibility.Auto}});
+        body.Children.Add(new TextBlock{Text="화면 검색 합계 (선택 반출 수량과 다를 수 있음): "+querySummary,TextWrapping=TextWrapping.Wrap,Foreground=Brushes.SlateGray,FontSize=11,Margin=new Thickness(4,5,4,8)});
         body.Children.Add(new TextBlock{Text="기본 저장: 패널별 최신 ERT + 이미지",FontWeight=FontWeights.SemiBold,Margin=new Thickness(4,4,4,2)});
         foreach(var item in new[]{_ert,_images,_barResult,_defectPoint})body.Children.Add(item);
+        body.Children.Add(_ertIssue);
         var extra=new Expander{Header="추가 자료 / 과거 검사",Margin=new Thickness(4)};var extraBody=new StackPanel();extra.Content=extraBody;foreach(var item in new[]{_counts,_csv,_handler,_history})extraBody.Children.Add(item);body.Children.Add(extra);
         body.Children.Add(new TextBlock{Text="폴더 예: EQ_09 / p2411-004d101 / LOT / L1-T-SHORT3.1-0200 / 005.ERT, 5 / 이미지.png\n작업 내역과 원본 추적 정보는 이 PC의 작업 기록에 따로 보관합니다.",TextWrapping=TextWrapping.Wrap,FontSize=11,Foreground=Brushes.SlateGray,Margin=new Thickness(4,6,4,8)});
         body.Children.Add(new TextBlock{Text="폴더 구성",Margin=new Thickness(4,4,0,2)});body.Children.Add(_layout);
@@ -45,6 +60,8 @@ internal sealed class BundleWindow : Window
         var buttons=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right,Margin=new Thickness(0,10,0,0)};body.Children.Add(buttons);
         buttons.Children.Add(new Button{Content="취소",IsCancel=true});var save=new Button{Content="대상 확인 →",IsDefault=true,Background=Brushes.RoyalBlue,Foreground=Brushes.White};buttons.Children.Add(save);
         save.Click+=(_,_)=>{if(string.IsNullOrWhiteSpace(Folder)){error.Text="저장 위치를 선택하세요.";return;}if(!Options.Ert&&!Options.Images&&!Options.Counts&&!Options.DefectCsv&&!Options.HandlerFiles&&!Options.BarResult&&!Options.DefectPoint){error.Text="저장할 자료를 하나 이상 선택하세요.";return;}DialogResult=true;};
+        foreach(var scope in new[]{_checked,_query,_panel})scope.Checked+=(_,_)=>UpdateScopeDetails();
+        _ert.Checked+=(_,_)=>UpdateScopeDetails();_ert.Unchecked+=(_,_)=>UpdateScopeDetails();UpdateScopeDetails();
     }
 }
 
