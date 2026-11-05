@@ -1,4 +1,4 @@
-using System.Data;
+﻿using System.Data;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
@@ -71,17 +71,18 @@ public partial class MainWindow : Window
         if(_idleLocked&&!_resuming)return;
         if(_exporting){Status.Text="추출 중입니다. 완료하거나 취소한 뒤 이동하세요.";return;}
         _queryCts?.Cancel();var cts=new CancellationTokenSource();_queryCts=cts;_exporting=export;
-        if(export){_detailCts?.Cancel();_exportSnapshots.Clear();}
+        if(export){_detailCts?.Cancel();_exportSnapshots.Clear();ExportProgressPanel.Visibility=Visibility.Visible;ExportProgress.IsIndeterminate=true;ExportProgressLabel.Text="내보내기 대상 확인 중…";StopExportButton.Visibility=Visibility.Visible;StopExportButton.IsEnabled=true;}
         UpdateActions();
         Status.Text=export?"추출 중 · 취소 가능":"조회 중 · 취소 가능";MoreButton.IsEnabled=false;
         try{await action(cts.Token);if(ReferenceEquals(_queryCts,cts))Status.Text=export?Notice.Text:"완료 · "+CountLabel.Text;}
-        catch(OperationCanceledException){if(ReferenceEquals(_queryCts,cts)){Status.Text="취소됨 · 부분 결과는 기록을 확인하세요";Log("작업 취소");}}
-        catch(Exception ex){if(ReferenceEquals(_queryCts,cts)){string error=ExplorerRepository.SafeError(ex);Status.Text=error;Notice.Text=error;Log(error);}}
+        catch(OperationCanceledException){if(ReferenceEquals(_queryCts,cts)){Status.Text="취소됨 · 부분 결과는 기록을 확인하세요";if(export)ExportProgressLabel.Text="내보내기 취소됨 · 완료된 파일과 작업 기록은 보존했습니다";Log("작업 취소");}}
+        catch(Exception ex){if(ReferenceEquals(_queryCts,cts)){string error=ExplorerRepository.SafeError(ex);Status.Text=error;Notice.Text=error;if(export)ExportProgressLabel.Text="내보내기 실패 · "+error;Log(error);}}
         finally
         {
             if(ReferenceEquals(_queryCts,cts))
             {
                 _exporting=false;_queryCts=null;ScheduleAutoRefresh();UpdateActions();
+                if(export){ExportProgress.IsIndeterminate=false;StopExportButton.Visibility=Visibility.Collapsed;}
                 if(export&&IsLoaded&&Selected() is not null&&_detailCts?.IsCancellationRequested==true&&(_level!=BrowseLevel.Defects||DefectImage.Source is null))
                     Results_SelectionChanged(Results,new SelectionChangedEventArgs(System.Windows.Controls.Primitives.Selector.SelectionChangedEvent,Array.Empty<object>(),Array.Empty<object>()));
             }
@@ -211,6 +212,7 @@ public partial class MainWindow : Window
     private async void SearchText_KeyDown(object sender,KeyEventArgs e){if(e.Key==Key.Enter){e.Handled=true;await SearchGlobalAsync();}}
     private async Task BeginQueryAsync(SearchFilter filter,BrowseLevel level,IEnumerable<string> databases,CancellationToken ct,bool history=true,Location[]? trail=null,bool allDatabases=false)
     {
+        if(!_exporting)ExportProgressPanel.Visibility=Visibility.Collapsed;
         _lastRefreshAttempt=DateTimeOffset.Now;
         int clearedChecks=_checkedRecords.Count;_checkedRecords.Clear();
         _summaryRows.Clear();_lotSummaryRows.Clear();PanelSummary.ItemsSource=LotSummary.ItemsSource=null;SummaryLabel.Text="조회·전체 건수 집계 중…";
@@ -272,7 +274,7 @@ public partial class MainWindow : Window
             var binding=new System.Windows.Data.Binding("["+column.ColumnName+"]"){TargetNullValue="—",Converter=DisplayConverter.Instance};
             var width=_view.ColumnWidths.TryGetValue(column.ColumnName,out double saved)?new DataGridLength(Math.Clamp(saved,65,600)):DataGridLength.Auto;
             var display=new DataGridTextColumn{Header=Labels.GetValueOrDefault(column.ColumnName,column.ColumnName),Binding=binding,SortMemberPath=column.ColumnName,MinWidth=65,MaxWidth=600,Width=width};
-            string? tip=column.ColumnName switch{"raw_x" or "raw_y"=>"DB 원본 좌표입니다. ERT 파일에는 소수점 6자리로 기록됩니다.","cad_x" or "cad_y"=>"DB 원본 CAD 소수 좌표입니다. ERT 정수 좌표는 별도 열에서 확인하세요.","ert_cad_x" or "ert_cad_y"=>"ERT 내보내기 규약대로 CAD 원본의 소수 부분을 버린 정수입니다.","source_axis_x" or "source_axis_y"=>"DB에 기록된 원본 축입니다. 구형 기록의 0/NULL은 미기록일 수 있으며 모델 재계산 값이 아닙니다.","source_block_idx"=>"DB 원본은 1부터 시작하는 바 번호입니다. ERT 파일은 0부터 기록합니다.",_=>null};
+            string? tip=column.ColumnName switch{"raw_x" or "raw_y"=>"DB 원본 좌표입니다. 최신 Data Transfer ERT에서는 불필요한 소수점 0을 생략합니다.","cad_x" or "cad_y"=>"DB 원본 CAD 소수 좌표입니다. ERT 정수 좌표는 별도 열에서 확인하세요.","ert_cad_x" or "ert_cad_y"=>"ERT 내보내기 규약대로 CAD 원본의 소수 부분을 버린 정수입니다.","source_axis_x" or "source_axis_y"=>"DB에 기록된 원본 축입니다. 구형 기록의 0/NULL은 미기록일 수 있으며 모델 재계산 값이 아닙니다.","source_block_idx"=>"DB 원본은 1부터 시작하는 바 번호입니다. ERT 파일은 0부터 기록합니다.",_=>null};
             if(tip is not null){var style=new Style(typeof(System.Windows.Controls.Primitives.DataGridColumnHeader),TryFindResource(typeof(System.Windows.Controls.Primitives.DataGridColumnHeader)) as Style);style.Setters.Add(new Setter(ToolTipService.ToolTipProperty,tip));display.HeaderStyle=style;}
             Results.Columns.Add(display);
         }
@@ -494,7 +496,7 @@ public partial class MainWindow : Window
                     string path=Path.Combine(output,$"{inspection.Long("panel_no"):D3}.ert");Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
                     ErtDocument? ert=null;
                     await snapshot.StreamInspectionAsync(_profile,inspection.Database,inspection.Text("inspection"),async(count,rows,writeToken)=>
-                    {ert=await ErtExporter.WriteStreamingAsync(path,inspection.Text("model_name"),inspection.Text("lot_id_name"),inspection.Text("layer_name"),(int)(inspection.Long("panel_no")??0),time,inspection.Text("inspection_status"),(int?)detail.Long("fov_count"),geometry,count,rows,Encoding.GetEncoding(949),writeToken);},token);
+                    {ert=await ErtExporter.WriteStreamingAsync(path,inspection.Text("model_name"),inspection.Text("lot_id_name"),inspection.Text("layer_name"),(int)(inspection.Long("panel_no")??0),time,inspection.Text("inspection_status"),(int?)detail.Long("fov_count"),geometry,count,rows,new UTF8Encoding(false),writeToken);},token);
                     if(ert is null)throw new InvalidDataException("ERT 추출 결과가 없습니다.");
                     await ExportService.WriteNewAsync(path+".source.json",JsonSerializer.Serialize(new{source=inspection.Database,inspection=inspection.Text("inspection"),pc=inspection.Text("pc_no"),capturedAt=captured,modelConsistency="모델 DB는 별도 읽기 스냅샷",scope="선택한 inspection_id에 속한 전체 불량. pc_no=0 공용 검사도 원본대로 유지. 다른 검사 ID와 자동 병합하지 않음.",ert.Rows,notes=ert.Notes},new JsonSerializerOptions{WriteIndented=true}),token);
                     await log.WriteLineAsync(JsonSerializer.Serialize(new{inspection.Database,id=inspection.Text("inspection"),status="saved",path}));ok++;
@@ -523,10 +525,11 @@ public partial class MainWindow : Window
             {
             var inspection=(await snapshot.QueryAsync(_profile,selectedInspection.Database,BrowseLevel.Inspections,new(){InspectionId=selectedInspection.Text("inspection")},1,null,token)).Rows.Single();
             var detail=await snapshot.DetailAsync(_profile,inspection.Key(_profile.Identity,BrowseLevel.Inspections),token);
+            var layerDetail=inspection.Text("layer_id").Length>0?await snapshot.DetailAsync(_profile,new(_profile.Identity,inspection.Database,"layer",inspection.Text("layer_id")),token):null;
             var rows=new List<ResultRow>();long total=0;
             await snapshot.StreamInspectionAsync(_profile,inspection.Database,inspection.Text("inspection"),async(count,source,readToken)=>
             {total=count;await foreach(var row in source.WithCancellation(readToken)){rows.Add(row);if(rows.Count==2000)break;}},token);
-            var ert=ErtExporter.Render("(저장 폴더 미지정)",inspection.Text("model_name"),inspection.Text("lot_id_name"),inspection.Text("layer_name"),(int)(inspection.Long("panel_no")??0),inspection["inspection_time"] is DateTime time?time:throw new InvalidDataException("검사 시각 미기록"),inspection.Text("inspection_status"),(int?)detail.Long("fov_count"),geometry,rows);
+            var ert=ErtExporter.Render("(저장 폴더 미지정)",inspection.Text("model_name"),inspection.Text("lot_id_name"),inspection.Text("layer_name"),(int)(inspection.Long("panel_no")??0),inspection["inspection_time"] is DateTime time?time:throw new InvalidDataException("검사 시각 미기록"),inspection.Text("inspection_status"),(int?)detail.Long("fov_count"),geometry,rows,InspectionBundleExporter.ErtMasterFolder(inspection,layerDetail,false));
             var panel=new DockPanel{Margin=new Thickness(18)};
             var label=new TextBlock{Text=$"{inspection.Database} / 검사 {inspection.Text("inspection")} / PC 값 {inspection.Text("pc_no")}\n전체 {total:N0}행 중 {rows.Count:N0}행 미리보기 (최대 2,000행). ERT 저장은 전체 행을 씁니다.\npc_no=0은 원본의 공용 검사 기록입니다. 다른 검사 ID를 자동 병합하지 않습니다.\n"+string.Join("\n",ert.Notes),TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,0,0,12)};DockPanel.SetDock(label,Dock.Top);panel.Children.Add(label);
             panel.Children.Add(new TextBox{Text=ert.Text,IsReadOnly=true,AcceptsReturn=true,AcceptsTab=true,HorizontalScrollBarVisibility=ScrollBarVisibility.Auto,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,FontFamily=new FontFamily("Consolas"),TextWrapping=TextWrapping.NoWrap});

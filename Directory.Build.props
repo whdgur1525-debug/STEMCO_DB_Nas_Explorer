@@ -1,4 +1,4 @@
-<Project>
+﻿<Project>
   <PropertyGroup>
     <NasTargetFramework Condition="'$(NasTargetFramework)' == ''">net9.0</NasTargetFramework>
     <TargetFramework>$(NasTargetFramework)</TargetFramework>
@@ -9,6 +9,6 @@
     <LangVersion>13</LangVersion>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <Deterministic>true</Deterministic>
-    <Version>0.3.1</Version>
+    <Version>0.3.2</Version>
   </PropertyGroup>
 </Project>

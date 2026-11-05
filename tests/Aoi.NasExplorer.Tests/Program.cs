@@ -28,6 +28,7 @@ internal static class Program
     }
     private static async Task UnitAsync(string output)
     {
+        await ErtFormatChecks.RunAsync(output,(name,action)=>Check(name,action));
         await Check("profile rejects empty host",()=>Throws<ArgumentException>(()=>new ConnectionProfile().Validate()));
         await Check("profile diagnostic text does not expose the password",()=>
         {string value=(new ConnectionProfile{Password="synthetic-test-secret"}).ToString();True(!value.Contains("synthetic-test-secret",StringComparison.Ordinal)&&value.Contains("[redacted]",StringComparison.Ordinal));});
@@ -58,9 +59,9 @@ internal static class Program
         });
         var g=new ModelGeometry(2.2,0,0,100,100,new double[]{0},new double[]{0},100,100,new double[]{10,30},new double[]{10,30},10,10,100,100);
         var row=new ResultRow{Database="a",Values=new(){["defects"]=1,["unit_idx"]=1,["unit_x"]=1,["unit_y"]=1,["raw_x"]=1.5,["raw_y"]=2.5,["cad_x"]=3.9,["cad_y"]=4.1,["defect_type"]=2,["vms_state"]=1,["vms_code"]=4,["source_metadata_version"]=1,["source_block_idx"]=2,["source_axis_x"]=3,["source_axis_y"]=4}};
-        await Check("ERT raw coordinates integer CAD and source block",()=>{var ert=ErtExporter.Render("C:\\test","model","lot","L1",1,new(2026,11,4,9,1,2),"VMS_COMPLETED",1,g,new[]{row});True(ert.Text.Contains("1.500000, 2.500000, 2, 0, 1, 3, 4")&&ert.Text.Contains(", 4, 1, , , B, -1, -1, 4, 3,"));Equal(5,ert.Text.Split("\r\n",StringSplitOptions.RemoveEmptyEntries).Length);});
+        await Check("ERT raw coordinates integer CAD and source block",()=>{var ert=ErtExporter.Render("C:\\test","model","lot","L1",1,new(2026,11,4,9,1,2),"VMS_COMPLETED",1,g,new[]{row});True(ert.Text.Contains("1.5, 2.5, 2, 0, 1, 3, 4")&&ert.Text.Contains(", 4, 1, , ,B, 0, 0, 4, 3,"));Equal(5,ert.Text.Split("\r\n",StringSplitOptions.RemoveEmptyEntries).Length);});
         await Check("ERT no-defect panel retained",()=>{var ert=ErtExporter.Render("C:\\test","model","lot","L1",2,new(2026,11,4),"COMPLETED",null,g,Array.Empty<ResultRow>());True(ert.Text.StartsWith("4.3.1, 0,"));Equal(4,ert.Text.Split("\r\n",StringSplitOptions.RemoveEmptyEntries).Length);});
-        await Check("ERT missing size explicitly noted",()=>True(ErtExporter.Render("C:\\test","m","l","L1",1,new(2026,11,4),"COMPLETED",1,g,new[]{row}).Notes.Any(x=>x.Contains("크기 미기록"))));
+        await Check("ERT Handler area mapping explicitly noted",()=>True(ErtExporter.Render("C:\\test","m","l","L1",1,new(2026,11,4),"COMPLETED",1,g,new[]{row}).Notes.Any(x=>x.Contains("Handler area"))));
         await Check("ERT rejects comma in header fields",()=>Throws<InvalidDataException>(()=>ErtExporter.Render("C:\\test","m,x","l","L1",1,new(2026,11,4),"COMPLETED",1,g,new[]{row})));
         await Check("ERT missing raw coordinates cannot be invented",()=>{var values=new Dictionary<string,object?>(row.Values);values["raw_x"]=null;Throws<InvalidDataException>(()=>ErtExporter.Render("C:\\test","m","l","L1",1,new(2026,11,4),"COMPLETED",1,g,new[]{new ResultRow{Values=values}}));});
         await Check("geometry excludes configured punch units",()=>Equal(3,(g with{PunchApply=true,PunchUnits=new[]{1}}).TotalUnits));
@@ -68,13 +69,13 @@ internal static class Program
         {
             var values=new Dictionary<string,object?>(row.Values){["raw_x"]=512d,["raw_y"]=512d,["cad_x"]=511d,["cad_y"]=512d,["d_attr"]=new double[]{9999,10},["vms_state"]=0,["defect_type"]=1,["defect_size"]=1.25};
             var ordinary=new ResultRow{Database="a",Values=values};True(!ExportService.IsRecordedPunch(ordinary));
-            True(ErtExporter.Render("C:\\test","m","l","L1",1,new(2026,11,4),"COMPLETED",1,g,new[]{ordinary}).Text.Contains(", 1.250000,"));
+            True(ErtExporter.Render("C:\\test","m","l","L1",1,new(2026,11,4),"COMPLETED",1,g,new[]{ordinary}).Text.Split("\r\n")[1].Split(',')[8].Trim()=="0");
             values["cad_x"]=512d;True(ExportService.IsRecordedPunch(new(){Values=values}));
         });
-        await Check("unreviewed alignment and inspection errors preserve forced bad markers",()=>
+        await Check("unreviewed alignment and inspection errors follow latest DataTransfer VMS state",()=>
         {
             foreach(int code in new[]{19,20})
-            {var error=new ResultRow{Values=new(row.Values){["defect_type"]=code,["vms_state"]=0}};True(ErtExporter.Render("C:\\test","m","l","L1",1,new(2026,11,4),"COMPLETED",1,g,new[]{error}).Text.Contains(", B, -1, -1,"));}
+            {var error=new ResultRow{Values=new(row.Values){["defect_type"]=code,["vms_state"]=0}};True(ErtExporter.Render("C:\\test","m","l","L1",1,new(2026,11,4),"COMPLETED",1,g,new[]{error}).Text.Contains(",V, 0, 0,"));}
         });
         await Check("atomic output never overwrites existing file",async()=>{string path=Path.Combine(output,"existing.txt");await File.WriteAllTextAsync(path,"original");try{await ExportService.WriteNewAsync(path,"new",default);throw new Exception("Expected IOException");}catch(IOException){}Equal("original",await File.ReadAllTextAsync(path));});
         await Check("CSV streams all input and writes provenance",async()=>{string path=Path.Combine(output,"csv-"+Guid.NewGuid().ToString("N")+".csv");long count=await ExportService.CsvAsync(path,ExportService.Enumerate(new[]{row,row}),default);Equal(2L,count);True((await File.ReadAllTextAsync(path)).StartsWith("\"source_database\","));});
@@ -209,7 +210,7 @@ CREATE TABLE aoi_punch(model_id bigint,punch_apply boolean,punch_units integer[]
         await Check("read-only startup setting rejects INSERT",async()=>{await using var c=new NpgsqlConnection(ExplorerRepository.ConnectionString(p,db1));await c.OpenAsync();await using var cmd=new NpgsqlCommand("INSERT INTO lot_id(lot_id_name,model_name) VALUES('SHOULD_NOT_EXIST','x')",c);try{await cmd.ExecuteNonQueryAsync();throw new Exception("write unexpectedly allowed");}catch(PostgresException ex){Equal("25006",ex.SqlState);}});
         await Check("cancelled query does not succeed",async()=>{using var cts=new CancellationTokenSource();cts.Cancel();try{await repo.QueryAsync(p,db1,BrowseLevel.Defects,new(),10,null,cts.Token);throw new Exception("Expected cancellation");}catch(OperationCanceledException){}});
         await Check("model geometry from separate model DB",async()=>Equal(4,(await repo.GeometryAsync(p,"MODEL_A","L1",default)).TotalUnits));
-        await Check("ERT reconstruction preserves selected record only",async()=>{var rows=(await Q(BrowseLevel.Defects,new(){InspectionId="2"})).Rows;var ert=ErtExporter.Render("C:\\test","MODEL_A","LOT_A","L1",1,new(2026,11,3),"VMS_COMPLETED",1,await repo.GeometryAsync(p,"MODEL_A","L1",default),rows);True(ert.Text.StartsWith("4.3.1, 1,"));True(ert.Text.Contains("11.000000, 21.000000"));});
+        await Check("ERT reconstruction preserves selected record only",async()=>{var rows=(await Q(BrowseLevel.Defects,new(){InspectionId="2"})).Rows;var ert=ErtExporter.Render("C:\\test","MODEL_A","LOT_A","L1",1,new(2026,11,3),"VMS_COMPLETED",1,await repo.GeometryAsync(p,"MODEL_A","L1",default),rows);True(ert.Text.StartsWith("4.3.1, 1,"));True(ert.Text.Contains("11, 21"));});
         await Check("all-result CSV streams across overlapping IDs",async()=>{async IAsyncEnumerable<ResultRow> All(){foreach(var db in new[]{db1,db2}){string? cur=null;do{var page=await Q(BrowseLevel.Defects,count:2,cursor:cur,db:db);foreach(var row in page.Rows)yield return row;cur=page.Cursor;}while(cur is not null);}}string path=Path.Combine(output,"integration-"+Guid.NewGuid().ToString("N")+".csv");Equal(10L,await ExportService.CsvAsync(path,All(),default));});
         // UUID schema is isolated and validates older pre-BIGSERIAL deployments without changing any real DB.
         try{await Admin(p,"postgres","CREATE DATABASE aoi_uuid");}catch(PostgresException ex)when(ex.SqlState=="42P04"){}
@@ -326,7 +327,7 @@ CREATE TABLE defects(defects uuid PRIMARY KEY,inspection uuid,unit_idx int,unit_
         string BundleRoot(string name)=>Path.Combine(output,"bundle-"+name+"-"+Guid.NewGuid().ToString("N"));
         await Check("Handler-style bundle expands a LOT into full panels and preserves reinspection collisions",async()=>
         {
-            string root=BundleRoot("lot");var result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){LotId="1"})},new(true,true,true,true),ImageFile,null,default);
+            string root=BundleRoot("lot");var result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){LotId="1"})},new(true,true,true,true,IncludeHistory:true),ImageFile,null,default);
             Equal(4L,result.Panels);Equal(4L,result.Defects);Equal(4L,result.ErtFiles);Equal(2L,result.Images);Equal(2L,result.MissingImages);Equal(0L,result.Failures);
             True(File.Exists(Path.Combine(root,"EQ09","MODEL_A","LOT_A","L1","001.ERT")));
             Equal(4,Directory.GetFiles(root,"*.ERT",SearchOption.AllDirectories).Length);True(Directory.GetDirectories(root,"_검사이력",SearchOption.AllDirectories).Length>0);
@@ -335,8 +336,40 @@ CREATE TABLE defects(defects uuid PRIMARY KEY,inspection uuid,unit_idx int,unit_
         });
         await Check("query export resolves matching LOTs before expanding complete panel contents",async()=>
         {
-            string root=BundleRoot("search");var result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){Images=ImageFilter.Present},BrowseLevel.Lots,true)},new(false,false,true,false),ImageFile,null,default);
+            string root=BundleRoot("search");var result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){Images=ImageFilter.Present},BrowseLevel.Lots,true)},new(false,false,true,false,IncludeHistory:true),ImageFile,null,default);
             Equal(4L,result.Panels);Equal(4L,result.Defects);True(!Directory.Exists(Path.Combine(root,"EQ09","MODEL_B")));
+        });
+        await Check("compact LOT selects latest physical panels and keeps provenance on this PC",async()=>
+        {
+            string root=BundleRoot("compact");var updates=new List<BundleProgress>();
+            var result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){LotId="1"})},new(true,false,false,false),ImageFile,null,default,updates.Add);
+            Equal(2L,result.Panels);Equal(2L,result.ErtFiles);Equal(0L,result.Failures);
+            True(Directory.GetFiles(root,"*",SearchOption.AllDirectories).All(x=>Path.GetExtension(x).Equals(".ERT",StringComparison.OrdinalIgnoreCase)));
+            True(!Directory.GetDirectories(root,"_검사이력",SearchOption.AllDirectories).Any());
+            True(File.Exists(Path.Combine(result.DiagnosticFolder,"내보내기결과.json"))&&!Path.GetFullPath(result.DiagnosticFolder).StartsWith(Path.GetFullPath(root),StringComparison.OrdinalIgnoreCase));
+            True(updates.Any(x=>x.PlannedPanels==2)&&updates.Any(x=>x.ProcessedPanels==2));
+        });
+        await Check("query inspection rows select latest while explicit older IDs remain exportable",async()=>
+        {
+            string root=BundleRoot("latest-query");
+            var result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){LotId="1"},BrowseLevel.Inspections,true)},new(false,false,true,false),ImageFile,null,default);
+            Equal(2L,result.Panels);
+            root=BundleRoot("explicit-history");
+            result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){InspectionId="1"}),new BundleScope(db1,new(){InspectionId="2"})},new(true,false,false,false),ImageFile,null,default);
+            Equal(2L,result.Panels);Equal(2L,result.ErtFiles);
+        });
+        await Check("declining plan confirmation creates no operator files and holds no snapshot",async()=>
+        {
+            string root=BundleRoot("declined");string diagnostic="";long planned=0;
+            try
+            {
+                await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){LotId="1"})},new(true,true,true,true),ImageFile,null,default,confirmPlan:async(plan,ct)=>
+                {diagnostic=plan.DiagnosticFolder;planned=plan.PlannedPanels;await Admin(p,db1,"BEGIN;LOCK TABLE defects IN ACCESS EXCLUSIVE MODE NOWAIT;ROLLBACK;");return false;});
+                throw new Exception("Expected declined export cancellation");
+            }
+            catch(OperationCanceledException){}
+            Equal(2L,planned);True(!Directory.GetFiles(root,"*",SearchOption.AllDirectories).Any());
+            using var receipt=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(diagnostic,"내보내기결과.json")));Equal("cancelled",receipt.RootElement.GetProperty("status").GetString());
         });
         await Check("one defect selection exports its whole panel and deduplicates checked defects",async()=>
         {
@@ -358,14 +391,14 @@ CREATE TABLE defects(defects uuid PRIMARY KEY,inspection uuid,unit_idx int,unit_
         });
         await Check("bundle cancellation writes a cancelled receipt and releases the snapshot",async()=>
         {
-            string root=BundleRoot("cancel");using var cts=new CancellationTokenSource();
+            string root=BundleRoot("cancel");string diagnostic="";using var cts=new CancellationTokenSource();
             try
             {
-                await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){InspectionId="1"})},new(false,true,true,false),async(row,image,folder,ct)=>{cts.Cancel();await Task.Delay(1,ct);return "unreachable";},null,cts.Token);
+                await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){InspectionId="1"})},new(false,true,true,false,IncludeHistory:true),async(row,image,folder,ct)=>{cts.Cancel();await Task.Delay(1,ct);return "unreachable";},null,cts.Token,confirmPlan:(plan,_)=>{diagnostic=plan.DiagnosticFolder;return Task.FromResult(true);});
                 throw new Exception("Expected cancellation");
             }
             catch(OperationCanceledException){}
-            using var receipt=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(root,"내보내기결과.json")));
+            using var receipt=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(diagnostic,"내보내기결과.json")));
             Equal("cancelled",receipt.RootElement.GetProperty("status").GetString());Equal(5,(await Q(BrowseLevel.Defects)).Rows.Count);
             string spool=receipt.RootElement.GetProperty("retainedSpoolDirectory").GetString()!;
             True(Path.IsPathFullyQualified(spool)&&Directory.Exists(spool)&&!Path.GetFullPath(spool).StartsWith(Path.GetFullPath(root),StringComparison.OrdinalIgnoreCase));
@@ -375,7 +408,7 @@ CREATE TABLE defects(defects uuid PRIMARY KEY,inspection uuid,unit_idx int,unit_
             try
             {
                 bool changed=false;string root=BundleRoot("live");
-                var result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){LotId="1"})},new(false,true,true,false),async(row,image,folder,ct)=>
+                var result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){LotId="1"})},new(false,true,true,false,IncludeHistory:true),async(row,image,folder,ct)=>
                 {
                     if(!changed)
                     {
@@ -424,7 +457,7 @@ CREATE TABLE defects(defects uuid PRIMARY KEY,inspection uuid,unit_idx int,unit_
                 await Admin(p,db1,"UPDATE inspection SET disposed_bar_mask=NULL WHERE inspection=1");
                 root=BundleRoot("handler-null");result=await InspectionBundleExporter.ExportAsync(repo,p,root,new[]{new BundleScope(db1,new(){InspectionId="1"})},new(false,false,false,false,HandlerFiles:true),ImageFile,null,default);
                 Equal(0L,result.Failures);True(result.Unrecoverable>0);True(!Directory.GetFiles(root,"block_dispose.txt",SearchOption.AllDirectories).Any());
-                using var receipt=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(root,"내보내기결과.json")));True(receipt.RootElement.GetProperty("unrecoverable").GetInt64()>0);
+                using var receipt=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(result.DiagnosticFolder,"내보내기결과.json")));True(receipt.RootElement.GetProperty("unrecoverable").GetInt64()>0);
             }
             finally{await Admin(p,db1,"UPDATE inspection SET disposed_bar_mask=NULL WHERE inspection=1");}
         });

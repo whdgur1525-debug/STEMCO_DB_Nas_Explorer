@@ -51,7 +51,9 @@ public partial class MainWindow
     private async Task SaveCheckedImagesAsync(string root,IReadOnlyList<ResultRow> selected,CancellationToken ct)
     {
         Directory.CreateDirectory(root);long saved=0,missing=0,failed=0;string status="completed";
-        await using var log=new StreamWriter(Path.Combine(root,"처리내역.jsonl"));
+        string diagnostic=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Synapse","NasExplorer","ExportHistory",DateTime.Now.ToString("yyyyMMdd_HHmmss")+"_"+Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(diagnostic);_lastDiagnosticFolder=diagnostic;DiagnosticButton.IsEnabled=true;
+        await using var log=new StreamWriter(Path.Combine(diagnostic,"처리내역.jsonl"));
         try
         {
             foreach(var row in selected)
@@ -68,7 +70,8 @@ public partial class MainWindow
                     await log.WriteLineAsync(JsonSerializer.Serialize(new{row.Database,id=row.Text("defects"),capturedAt=captured,status="saved",path}));
                 }
                 catch(Exception ex) when(ex is not OperationCanceledException){failed++;await log.WriteLineAsync(JsonSerializer.Serialize(new{row.Database,id=row.Text("defects"),status="failed",error=ex.Message}));}
-                Status.Text=$"체크 이미지 · 저장 {saved:N0} / 미기록 {missing:N0} / 실패 {failed:N0}";
+                Status.Text=ExportProgressLabel.Text=$"체크 이미지 · 저장 {saved:N0} / 미기록 {missing:N0} / 실패 {failed:N0}";
+                ExportProgress.IsIndeterminate=false;ExportProgress.Maximum=Math.Max(1,selected.Count);ExportProgress.Value=saved+missing+failed;
             }
             if(failed>0)status="partial_failure";
         }
@@ -76,7 +79,8 @@ public partial class MainWindow
         catch{status="failed";throw;}
         finally
         {
-            await File.WriteAllTextAsync(Path.Combine(root,"결과.json"),JsonSerializer.Serialize(new{status,selected=selected.Count,saved,missing,failed,endedAt=DateTimeOffset.Now}),CancellationToken.None);
+            await File.WriteAllTextAsync(Path.Combine(diagnostic,"결과.json"),JsonSerializer.Serialize(new{status,outputDirectory=Path.GetFullPath(root),selected=selected.Count,saved,missing,failed,endedAt=DateTimeOffset.Now}),CancellationToken.None);
+            Log("체크 이미지 작업 기록: "+diagnostic);
             SetOutput(root,$"체크 이미지 · 저장 {saved:N0} / 미기록 {missing:N0} / 실패 {failed:N0}",true);
         }
     }

@@ -69,19 +69,28 @@ public sealed record ErtDocument(string Text,IReadOnlyList<string> Notes,int Row
 public static class ErtExporter
 {
     private static readonly CultureInfo Inv=CultureInfo.InvariantCulture;
-    public static ErtDocument Render(string folder,string model,string lot,string layer,int panel,DateTime time,
-        string status,int? fovCount,ModelGeometry g,IReadOnlyList<ResultRow> defects)
+    // File VMS parses the Handler's fixed-point values and writes them with its default
+    // numeric format. This is also the DataTransfer contract (7989f97, 2026-11-05).
+    private static string VmsNumber(double value,int handlerDigits)=>(Math.Round(value,handlerDigits)+0.0).ToString("G15",Inv);
+    private static string Header(string folder,string model,long count,string status,int? fovCount,ModelGeometry g)
     {
-        if(new[]{model,lot,layer,folder}.Any(x=>x.IndexOfAny(new[]{',','\r','\n'})>=0)) throw new InvalidDataException("ERT 경로·이름에는 쉼표나 줄바꿈을 사용할 수 없습니다.");
+        int total=g.TotalUnits,perFov=fovCount is >0?total/3/fovCount.Value:0;
+        int reviewed=status is "VMS_COMPLETED" or "MES_COMPLETED"?1:0;
+        int motion=reviewed==1&&count>0?1:0;
+        return FormattableString.Invariant($"4.3.1, {count}, {folder}, 10000, 10000, {total}, {total/3}, {perFov}, {perFov}, {perFov}, {model}, {motion}, {reviewed}, \r\n");
+    }
+    public static ErtDocument Render(string folder,string model,string lot,string layer,int panel,DateTime time,
+        string status,int? fovCount,ModelGeometry g,IReadOnlyList<ResultRow> defects,string? masterFolder=null)
+    {
+        if(new[]{model,lot,layer,folder,masterFolder??folder}.Any(x=>x.IndexOfAny(new[]{',','\r','\n'})>=0)) throw new InvalidDataException("ERT 경로·이름에는 쉼표나 줄바꿈을 사용할 수 없습니다.");
         if(g.Resolution<=0 || !double.IsFinite(g.Resolution)) throw new InvalidDataException("모델 해상도가 올바르지 않습니다.");
-        var notes=new HashSet<string>(StringComparer.Ordinal){"모델 위치·해상도는 현재 모델 DB 기준입니다. 검사 당시 모델 스냅샷임을 보장하지 않습니다.","헤더 유닛수·분할 축은 모델 기반 재구성입니다. Handler 원본 open_short_GM/검사 당시 축 분할 정보가 없어 NO_DB 원본 헤더와 같음을 보장하지 않습니다.","VMS 판정 변경시각이 DB에 별도 기록되지 않아 ERT의 리뷰 시각은 -1입니다."};
-        int total=g.TotalUnits; int perFov=fovCount is >0 ? total/3/fovCount.Value : 0;
+        var notes=new HashSet<string>(StringComparer.Ordinal){"모델 위치·해상도는 현재 모델 DB 기준입니다. 검사 당시 모델 스냅샷임을 보장하지 않습니다.","헤더 유닛수·분할 축은 모델 기반 재구성입니다. Handler 원본 open_short_GM/검사 당시 축 분할 정보가 없어 NO_DB 원본 헤더와 같음을 보장하지 않습니다.","ERT는 파일 VMS·DataTransfer 양식입니다. 9번째 칸은 Handler area(일반 0, 증거가 있는 펀치 9999)이며 DB defect_size 실측값과 다릅니다. 실측값은 원본 상세·CSV에 보존됩니다.","VMS 판정 날짜·시각은 공란, reserved 값은 파일 VMS 양식의 0입니다."};
+        if(string.IsNullOrWhiteSpace(masterFolder))notes.Add("VMS 원본 AOI ERT 경로 미기록: 헤더 경로는 이번 내보내기 폴더입니다. 검사 당시 저장 경로로 보장하지 않습니다.");
         if(fovCount is null or <=0) notes.Add("FOV 개수 미기록: ERT FOV당 유닛수는 호환 기본값 0입니다.");
         int reviewed=status is "VMS_COMPLETED" or "MES_COMPLETED"?1:0;
         var text=new StringBuilder();
-        void Line(FormattableString s)=>text.Append(s.ToString(Inv)).Append("\r\n");
-        Line($"4.3.1, {defects.Count}, {folder}, 10000, 10000, {total}, {total/3}, {perFov}, {perFov}, {perFov}, {model}, 0, {reviewed}");
-        foreach(var d in defects.OrderBy(x=>x.Long("unit_idx")))text.Append(RenderRow(d,g,layer,reviewed,notes));
+        text.Append(Header(string.IsNullOrWhiteSpace(masterFolder)?folder:masterFolder,model,defects.Count,status,fovCount,g));
+        foreach(var d in defects.OrderBy(x=>x.Long("unit_idx")).ThenBy(x=>x.Long("defects")))text.Append(RenderRow(d,g,layer,reviewed,notes));
         text.Append(Footer(model,lot,layer,panel,time,g));
         return new(text.ToString(),notes.ToArray(),defects.Count);
     }
@@ -98,8 +107,8 @@ public static class ErtExporter
                 if(ux>0&&ux<=g.FrameX.Length&&uy>0&&uy<=g.UnitY.Length)
                 {
                     double rx=g.FrameX[ux-1],ry=g.UnitY[uy-1];
-                    int col=Array.FindIndex(g.BlockX,x=>rx>=x&&rx<=x+g.BlockWidth);
-                    int row=Array.FindIndex(g.BlockY,y=>ry>=y&&ry<=y+g.BlockHeight);
+                    int col=Array.FindIndex(g.BlockX,x=>rx>=x&&rx<=x+(g.BlockWidth>0?g.BlockWidth:193.0));
+                    int row=Array.FindIndex(g.BlockY,y=>ry>=y&&ry<=y+(g.BlockHeight>0?g.BlockHeight:232.0));
                     if(col>=0&&row>=0){ if(layer.Contains("l2",StringComparison.OrdinalIgnoreCase)) col=g.BlockX.Length-1-col; block=col*g.BlockY.Length+(col%2==0?row+1:g.BlockY.Length-row); }
                 }
                 int nx=g.UnitWidth>0?(int)Math.Round(g.InspectWidth/g.UnitWidth):0;
@@ -107,30 +116,31 @@ public static class ErtExporter
                 if(nx>0&&ny>0){ax=(ux-1)%nx+1; ay=(uy-1)%ny+1;}
                 if(block<=0){block=1;notes.Add("모델 범위 밖 행: 기존 다운로드 규약의 바 인덱스 0을 사용했습니다. 원본 좌표는 그대로입니다.");}
             }
+            ax=Math.Max(0,ax);ay=Math.Max(0,ay);
             bool punch=ExportService.IsRecordedPunch(d);
             int code=(int)Num("vms_code"),state=(int)Num("vms_state");
             string mark=state==1?"B":state==2?"P":"V";
-            if(state==0&&d.Long("defect_type") is 19 or 20)mark="B";
             if(punch&&reviewed==0){mark="B";if(code==0)code=4;}
-            // Match the current DataTransfer writer, retaining recorded sizes only when available.
-            double area=punch?9999:d.Number("defect_size")??0;
-            if(!punch&&!d.Number("defect_size").HasValue) notes.Add("크기 미기록 행: ERT 면적에 호환 기본값 0을 썼습니다. 원본 상세의 미기록 상태는 유지됩니다.");
-            return FormattableString.Invariant($"0, {Num("raw_x"):F6}, {Num("raw_y"):F6}, {(int)Num("defect_type")}, 0, {ux}, {(int)Num("cad_x")}, {(int)Num("cad_y")}, {area:F6}, {(int)Num("unit_idx")}, {code}, {block-1}, , , {mark}, -1, -1, {ay}, {ax}, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, \r\n");
+            // Handler's m_dArea is zero for ordinary defects and 9999 for recorded
+            // punch markers. Its m_dDefectSize (-9999 when unmeasured) is a different field.
+            int area=punch?9999:0;
+            return FormattableString.Invariant($"0, {VmsNumber(Num("raw_x"),6)}, {VmsNumber(Num("raw_y"),6)}, {(int)Num("defect_type")}, 0, {ux}, {(int)Num("cad_x")}, {(int)Num("cad_y")}, {area}, {(int)Num("unit_idx")}, {code}, {block-1}, , ,{mark}, 0, 0, {ay}, {ax}, 0, 0, 0, 0, 0, 0, 0, 0, 0, \r\n");
     }
     private static string Footer(string model,string lot,string layer,int panel,DateTime time,ModelGeometry g)=>
-        FormattableString.Invariant($"{g.Left:F6}, {g.Top:F6}, {g.Right:F6}, {g.Bottom:F6}, 0, 0, \r\n{model}, {layer}, {lot}, {panel:D3}, {g.Resolution:F1}, 0, \r\n{time.Year}, {time.Month:D2}, {time.Day:D2}, {time.Hour:D2}, {time.Minute:D2}, {time.Second:D2}, \r\n");
+        FormattableString.Invariant($"0, 0, 0, 0, 0, 0, \r\n{model}, {layer}, {lot}, {panel}, {VmsNumber(g.Resolution,1)}, 0, \r\n{time.Year}, {time.Month}, {time.Day}, {time.Hour}, {time.Minute}, {time.Second}, \r\n");
     public static async Task<ErtDocument> WriteStreamingAsync(string path,string model,string lot,string layer,int panel,DateTime time,
-        string status,int? fovCount,ModelGeometry geometry,long expectedRows,IAsyncEnumerable<ResultRow> source,Encoding encoding,CancellationToken ct)
+        string status,int? fovCount,ModelGeometry geometry,long expectedRows,IAsyncEnumerable<ResultRow> source,Encoding encoding,CancellationToken ct,string? masterFolder=null)
     {
         string folder=Path.GetDirectoryName(Path.GetFullPath(path))!;
-        var template=Render(folder,model,lot,layer,panel,time,status,fovCount,geometry,Array.Empty<ResultRow>());
+        if(expectedRows<0)throw new ArgumentOutOfRangeException(nameof(expectedRows));
+        var template=Render(folder,model,lot,layer,panel,time,status,fovCount,geometry,Array.Empty<ResultRow>(),masterFolder);
         var notes=template.Notes.ToHashSet(StringComparer.Ordinal);int reviewed=status is "VMS_COMPLETED" or "MES_COMPLETED"?1:0;
-        string header=template.Text[..template.Text.IndexOf("\r\n",StringComparison.Ordinal)].Replace("4.3.1, 0,",$"4.3.1, {expectedRows},",StringComparison.Ordinal);
+        string header=Header(string.IsNullOrWhiteSpace(masterFolder)?folder:masterFolder,model,expectedRows,status,fovCount,geometry);
         string pending=path+".partial-"+Guid.NewGuid().ToString("N");Directory.CreateDirectory(folder);long count=0;
         await using(var file=new FileStream(pending,FileMode.CreateNew,FileAccess.Write,FileShare.Read,65536,true))
         await using(var writer=new StreamWriter(file,encoding))
         {
-            await writer.WriteAsync((header+"\r\n").AsMemory(),ct);
+            await writer.WriteAsync(header.AsMemory(),ct);
             await foreach(var row in source.WithCancellation(ct)){await writer.WriteAsync(RenderRow(row,geometry,layer,reviewed,notes).AsMemory(),ct);count++;}
             if(count!=expectedRows)throw new InvalidDataException($"ERT 행수 불일치: expected={expectedRows}, actual={count}. 부분 파일을 보존했습니다.");
             await writer.WriteAsync(Footer(model,lot,layer,panel,time,geometry).AsMemory(),ct);

@@ -36,7 +36,8 @@ public partial class MainWindow
         if(name=="source_database")return _queryDatabases.Count>1;
         if(name=="lot_id")return _level==BrowseLevel.Lots;
         if(name is "layer" or "layer_id" or "missing_fields" or "fov_count" or "total_defects")return false;
-        if(name=="panel_no"&&_filter.InspectionId.Length>0&&_filter.Panel.HasValue)return false;
+        if(name=="panel_no"&&_filter.Panel.HasValue)return false;
+        if(name=="machine_id"&&_filter.MachineExact&&_filter.Machine.Length>0)return false;
         if(_level==BrowseLevel.Defects)return new[]{"model_name","lot_id_name","layer_name","panel_no","machine_id","inspection_time","inspection","unit_idx","unit_x","unit_y","raw_x","raw_y","cad_x","cad_y","ert_cad_x","ert_cad_y","source_block_idx","source_axis_x","source_axis_y","defect_type","vms_state","vms_code","cause_key","defect_size","has_image","defects"}.Contains(name);
         return true;
     }
@@ -73,7 +74,7 @@ public partial class MainWindow
     private void RenderScopePath()
     {
         PathPanel.Children.Clear();var f=_filter;string mode=f.Target switch{SearchTarget.Lot=>"LOT 검색",SearchTarget.Model=>"모델 검색",_=>"모델/LOT 검색"};
-        PathPanel.Children.Add(new TextBlock{Text=$"검색 방식: {mode}"+(f.Text.Length>0?$" ({f.Text})":""),FontSize=11,Margin=new Thickness(0,0,5,0)});
+        Breadcrumb.Text=$"{mode}"+(f.Text.Length>0?$" ‘{f.Text}’":"")+" · "+LevelNames[(int)_level]+" · DB: "+(_queryDatabases.Count==1?_queryDatabases[0]:$"전체 {_queryDatabases.Count:N0}개");
         if(_trail.Count>1)
         {
             var root=_trail[0];var back=new Button{Content="검색 결과",Padding=new Thickness(4,2,4,2),Margin=new Thickness(0),ToolTip="처음 검색했던 조건으로 돌아갑니다"};
@@ -82,18 +83,20 @@ public partial class MainWindow
         void Part(string label,SearchFilter target,BrowseLevel level,bool enabled)
         {
             PathPanel.Children.Add(new TextBlock{Text=" / ",Foreground=System.Windows.Media.Brushes.Gray});
-            var button=new Button{Content=label,Padding=new Thickness(4,2,4,2),Margin=new Thickness(0),BorderThickness=new Thickness(0),Background=System.Windows.Media.Brushes.Transparent,IsEnabled=enabled,ToolTip="이 범위의 목록으로 이동"};
+            var button=new Button{Content=label,Padding=new Thickness(6,4,6,4),Margin=new Thickness(0,3,0,0),BorderThickness=new Thickness(0),Background=System.Windows.Media.Brushes.White,Foreground=new SolidColorBrush(Color.FromRgb(30,64,130)),FontWeight=FontWeights.SemiBold,IsEnabled=enabled,ToolTip=label+" · 이 범위의 목록으로 이동"};
             button.Click+=async(_,_)=>{if(_queryCts is null)await RunAsync(ct=>BeginQueryAsync(target,level,_queryDatabases.ToArray(),ct,allDatabases:_allDatabases));};PathPanel.Children.Add(button);
         }
         Part("Model ("+(f.Model.Length>0?f.Model:"전체")+")",f with{Lot="",LotId="",Layer="",LayerId="",InspectionId="",Panel=null,Text=""},f.Model.Length>0?BrowseLevel.Lots:BrowseLevel.Models,true);
         Part("LotID ("+(f.Lot.Length>0?f.Lot:"전체")+")",f with{Layer="",LayerId="",InspectionId="",Panel=null},f.Lot.Length>0?BrowseLevel.Layers:BrowseLevel.Lots,true);
         Part("Layer ("+(f.Layer.Length>0?f.Layer:"전체")+")",f with{InspectionId="",Panel=null},f.Layer.Length>0?BrowseLevel.Inspections:BrowseLevel.Layers,f.Lot.Length>0||f.Layer.Length>0);
-        if(f.Panel.HasValue)PathPanel.Children.Add(new TextBlock{Text=$" / 패널 ({f.Panel})"+(f.InspectionId.Length>0?$" · 검사 Index {f.InspectionId}":""),FontSize=12});
+        if(f.MachineExact&&f.Machine.Length>0)PathPanel.Children.Add(new TextBlock{Text=" / 장비 ("+f.Machine+")",FontSize=12,FontWeight=FontWeights.SemiBold});
+        if(f.Panel.HasValue)PathPanel.Children.Add(new TextBlock{Text=$" / 패널 ({f.Panel})"+(f.InspectionId.Length>0?$" · 검사 Index {f.InspectionId}":""),FontSize=12,FontWeight=FontWeights.Bold,Foreground=new SolidColorBrush(Color.FromRgb(30,64,130))});
         if(f.Layer.Length>0)
         {
             var row=new ResultRow{Values=new(){["layer_name"]=f.Layer}};EnrichLayer(row);
-            PathPanel.Children.Add(new TextBlock{Text=$"  [레이어 코드 {row.Text("layer_side")}"+(row.Text("layer_direction").Length>0?" / 방향 코드 "+row.Text("layer_direction"):"")+$" / 프로파일 {row.Text("layer_recipe")} / 해상도 코드 {row.Text("layer_resolution_code")}]",FontSize=11,Foreground=System.Windows.Media.Brushes.SlateGray});
+            ScopeHeader.ToolTip=$"Model: {f.Model}\nLOT: {f.Lot}\nLayer: {f.Layer}\n레이어 코드 {row.Text("layer_side")} / 방향 {row.Text("layer_direction")} / 프로파일 {row.Text("layer_recipe")} / 해상도 코드 {row.Text("layer_resolution_code")}";
         }
+        else ScopeHeader.ToolTip="파란 경로가 현재 표에 적용된 범위입니다. 경로를 클릭하면 해당 목록으로 돌아갑니다.";
     }
     private string? CurrentPanelId()=>_filter.InspectionId.Length>0?_filter.InspectionId:Selected()?.Text("inspection") is string id&&id.Length>0?id:null;
     private async void Bundle_Click(object sender,RoutedEventArgs e)
@@ -107,7 +110,16 @@ public partial class MainWindow
         try{scopes=CreateBundleScopes(dialog.Mode,panelId);}
         catch(Exception ex){Notice.Text="내보내기 범위 확인 실패: "+ex.Message;return;}
         string root=Path.Combine(dialog.Folder,"검사결과_"+DateTime.Now.ToString("yyyyMMdd_HHmmss")+"_"+Guid.NewGuid().ToString("N")[..6]);
-        await RunAsync(ct=>RunBundleAsync(root,scopes,dialog.Options,ct),true);
+        string description=DescribeBundleSelection(dialog.Mode,scopes,dialog.Options);
+        await RunAsync(ct=>RunBundleAsync(root,scopes,dialog.Options,ct,plan=>
+        {
+            ct.ThrowIfCancellationRequested();
+            string targets=description+"\n\n실제 대상 폴더 "+plan.FolderCount.ToString("N0")+"개\n"+string.Join("\n",plan.Folders);
+            if(plan.UnknownIdentityPanels>0)targets+=$"\n식별 정보가 일부 미기록인 검사 {plan.UnknownIdentityPanels:N0}개도 위 검사 수에 포함되어 있으며 별도로 보존합니다.";
+            if(plan.FolderCount>plan.Folders.Count)targets+=$"\n… 나머지 {plan.FolderCount-plan.Folders.Count:N0}개는 상세 기록의 패널목록에서 확인할 수 있습니다.";
+            var confirmation=new BundleConfirmWindow(plan.PlannedPanels,dialog.Mode,targets,root,dialog.Options){Owner=this};
+            bool accepted=ShowModal(()=>confirmation.ShowDialog())==true;ct.ThrowIfCancellationRequested();return Task.FromResult(accepted);
+        }),true);
     }
     private List<BundleScope> CreateBundleScopes(BundleMode mode,string? panelId)
     {
@@ -120,16 +132,57 @@ public partial class MainWindow
         if(mode==BundleMode.Checked)return _checkedRecords.Values.Select(row=>new BundleScope(row.Database,InspectionBundleExporter.SelectionFilter(_filter,_level,row))).ToList();
         return _queryDatabases.Select(db=>new BundleScope(db,_filter,_level,true)).ToList();
     }
-    private async Task RunBundleAsync(string root,IReadOnlyList<BundleScope> scopes,BundleOptions options,CancellationToken ct)
+    private string? _lastDiagnosticFolder;
+    private void OpenDiagnostics_Click(object sender,RoutedEventArgs e)
+    {
+        if(_lastDiagnosticFolder is null)return;
+        try{System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo{FileName=_lastDiagnosticFolder,UseShellExecute=true});}
+        catch(Exception ex){Log("작업 기록 폴더 열기 실패: "+ex.Message);}
+    }
+    private void UpdateBundleProgress(BundleProgress progress)
+    {
+        ExportProgressPanel.Visibility=Visibility.Visible;
+        bool planned=progress.Phase is not ("planning" or "selection");
+        ExportProgress.IsIndeterminate=!planned||progress.PlannedPanels<=0;
+        if(!ExportProgress.IsIndeterminate)
+        {
+            double panelFraction=progress.CurrentPanelExpected>0?Math.Min(0.95,(double)progress.CurrentPanelImages/progress.CurrentPanelExpected):0;
+            ExportProgress.Maximum=progress.PlannedPanels;ExportProgress.Value=Math.Min(progress.PlannedPanels,progress.ProcessedPanels+panelFraction);
+        }
+    }
+    private static string DescribeBundleSelection(BundleMode mode,IReadOnlyList<BundleScope> scopes,BundleOptions options)
+    {
+        var text=new System.Text.StringBuilder();
+        text.AppendLine(mode switch{BundleMode.Query=>"범위: 현재 검색 전체 (아직 읽지 않은 항목 포함)",BundleMode.Checked=>"범위: 체크한 항목",_=>"범위: 현재 패널"});
+        text.AppendLine(options.IncludeHistory?"검사 이력: 과거 검사도 포함":"검사 이력: 폴더는 패널별 최신 검사 / 명시한 검사 Index는 그대로");
+        text.AppendLine("Model·LOT·Layer 폴더를 선택하면 해당 폴더의 전체 패널 불량을 저장합니다. 불량 코드·이미지 유무 등의 필터로 패널 안의 기록을 잘라내지 않습니다.");
+        foreach(var scope in scopes)
+        {
+            var f=scope.Filter;text.AppendLine();text.AppendLine("DB: "+scope.Database);
+            text.AppendLine($"Model: {(f.Model.Length>0?f.Model:"전체")} / LotID: {(f.Lot.Length>0?f.Lot:"전체")} / Layer: {(f.Layer.Length>0?f.Layer:"전체")}");
+            if(f.InspectionId.Length>0)text.AppendLine("검사 Index: "+f.InspectionId);
+            if(f.Panel.HasValue)text.AppendLine("패널: "+f.Panel);
+            if(f.Machine.Length>0)text.AppendLine("장비: "+f.Machine);
+            if(scope.ExpandQuery&&f.Text.Length>0)text.AppendLine("검색어: "+f.Text);
+        }
+        return text.ToString();
+    }
+    private async Task RunBundleAsync(string root,IReadOnlyList<BundleScope> scopes,BundleOptions options,CancellationToken ct,Func<BundlePlanSummary,Task<bool>>? confirm=null)
     {
         PrepareOutput(Path.Combine(root,".write-check"));
         try
         {
-            var result=await InspectionBundleExporter.ExportAsync(_repository,_profile,root,scopes,options,SaveHandlerImageAsync,text=>Status.Text=text,ct);
+            var result=await InspectionBundleExporter.ExportAsync(_repository,_profile,root,scopes,options,SaveHandlerImageAsync,text=>{Status.Text=text;ExportProgressLabel.Text=text;},ct,UpdateBundleProgress,async(plan,_)=>
+            {
+                _lastDiagnosticFolder=plan.DiagnosticFolder;DiagnosticButton.IsEnabled=true;
+                return confirm is null||await confirm(plan);
+            });
+            _lastDiagnosticFolder=result.DiagnosticFolder;Log("내보내기 작업 기록: "+result.DiagnosticFolder);
             string state=result.Status switch{"completed"=>"완료","completed_with_limitations"=>"완료 · 복원 제한 있음","partial_failure"=>"일부 실패","empty"=>"해당 패널 없음",_=>result.Status};
-            SetOutput(root,$"내보내기 {state} · 패널 {result.Panels:N0}개 / 불량 {result.Defects:N0}건 / ERT {result.ErtFiles:N0}개 / 이미지 {result.Images:N0}개 / 이미지 미기록 {result.MissingImages:N0}건 / 보조 파일 {result.SidecarFiles:N0}개 / 복원 제한 {result.Unrecoverable:N0}항목 / 실패 {result.Failures:N0}건 · 사유는 처리내역",true);
+            SetOutput(root,$"내보내기 {state} · 패널 {result.Panels:N0}개 / 불량 {result.Defects:N0}건 / ERT {result.ErtFiles:N0}개 / 이미지 {result.Images:N0}개 / 이미지 미기록 {result.MissingImages:N0}건 / 실패 {result.Failures:N0}건 · 자세한 내용은 작업 기록",true);
+            ExportProgressLabel.Text=Notice.Text;
         }
-        catch{_lastOutput=root;throw;}
+        catch(Exception ex){_lastOutput=root;if(ex.Data["DiagnosticFolder"] is string diagnostics){_lastDiagnosticFolder=diagnostics;DiagnosticButton.IsEnabled=true;Log("내보내기 작업 기록: "+diagnostics);}throw;}
     }
     private static async Task<string> SaveHandlerImageAsync(ResultRow row,ImagePayload image,string folder,CancellationToken ct)
     {
@@ -138,13 +191,21 @@ public partial class MainWindow
         string extension=Path.GetExtension(source);if(new[]{".png",".bmp",".jpg",".jpeg",".tif",".tiff",".raw"}.Contains(extension,StringComparer.OrdinalIgnoreCase))source=source[..^extension.Length];
         source=InspectionBundleExporter.Component(source);
         string path=Path.Combine(folder,source+".png");if(File.Exists(path))path=Path.Combine(folder,source+"__D"+InspectionBundleExporter.Component(row.Text("defects"))+".png");
-        // Preserve the original payload independently of a display conversion failure.
-        string rawFolder=Path.Combine(folder,"_원본");Directory.CreateDirectory(rawFolder);
-        string raw=Path.Combine(rawFolder,Path.GetFileNameWithoutExtension(path)+".bytes");
-        await using(var file=new FileStream(raw,FileMode.CreateNew,FileAccess.Write,FileShare.Read,65536,true))await file.WriteAsync(image.Bytes,ct);
-        await ExportService.WriteNewAsync(raw+".json",ExportService.Json(row),ct);
-        var bitmap=BitmapDecoderService.Decode(image);var png=new PngBitmapEncoder();png.Frames.Add(BitmapFrame.Create(bitmap));
-        string partial=path+".partial-"+Guid.NewGuid().ToString("N");using(var stream=new FileStream(partial,FileMode.CreateNew))png.Save(stream);
-        ct.ThrowIfCancellationRequested();File.Move(partial,path,false);return path;
+        // Bundle staging retains the original DB payload locally if conversion fails.
+        // The operator's result folder contains only the requested image.
+        string partial=path+".partial-"+Guid.NewGuid().ToString("N");
+        try
+        {
+            var bitmap=BitmapDecoderService.Decode(image);var png=new PngBitmapEncoder();png.Frames.Add(BitmapFrame.Create(bitmap));
+            using(var stream=new FileStream(partial,FileMode.CreateNew))png.Save(stream);
+            ct.ThrowIfCancellationRequested();File.Move(partial,path,false);return path;
+        }
+        catch
+        {
+            string recovery=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Synapse","NasExplorer","ImageFailures",Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(recovery);await File.WriteAllBytesAsync(Path.Combine(recovery,"original.bytes"),image.Bytes,CancellationToken.None);
+            await ExportService.WriteNewAsync(Path.Combine(recovery,"source.json"),ExportService.Json(row),CancellationToken.None);throw;
+        }
+        finally{if(File.Exists(partial))File.Delete(partial);}
     }
 }

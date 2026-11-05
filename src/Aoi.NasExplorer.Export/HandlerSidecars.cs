@@ -37,7 +37,7 @@ public static class HandlerSidecars
             return new(saved,normal,unavailable,failed,null);
         }
         long? mask=detail.Values.ContainsKey("disposed_bar_mask")?detail.Long("disposed_bar_mask"):inspection.Long("disposed_bar_mask");
-        if(mask is >=0)await Save(Path.Combine(panelFolder,"block_dispose.txt"),mask.Value.ToString(CultureInfo.InvariantCulture)+"\n");
+        if(mask is >=0)await Save(Path.Combine(panelFolder,"block_dispose.txt"),mask.Value.ToString(CultureInfo.InvariantCulture)+"\r\n");
         else unavailable.Add(new("block_dispose.txt","mask_not_recorded","disposed_bar_mask가 NULL·비정수·음수이므로 정상 0을 만들지 않습니다."));
 
         int[] punches=dbPunchUnitIds.Where(x=>x>=0).Distinct().OrderBy(x=>x).ToArray();
@@ -82,7 +82,7 @@ public static class HandlerSidecars
 
     // Call once per actual export layer folder, after collecting all panel contributions.
     // This avoids first-panel-only punch lists and CreateNew collisions across panels.
-    public static async Task<Outcome> FinalizeLayerAsync(IReadOnlyList<LayerContribution> panels,CancellationToken ct)
+    public static async Task<Outcome> FinalizeLayerAsync(IReadOnlyList<LayerContribution> panels,CancellationToken ct,string? diagnosticFolder=null)
     {
         var saved=new List<string>();var normal=new List<Reason>();var unavailable=new List<Reason>();var failed=new List<Reason>();var notes=new List<string>();
         if(panels.Count==0){normal.Add(new("layer_sidecars","empty_scope","선택된 검사 없음"));return new(saved,normal,unavailable,failed,null);}
@@ -98,19 +98,24 @@ public static class HandlerSidecars
         int[] punches=panels.SelectMany(p=>p.PunchUnits).Distinct().OrderBy(x=>x).ToArray();
         if(punches.Length>0)
         {
-            await Save(Path.Combine(folder,"punch.json"),JsonSerializer.Serialize(new{PunchFlag=1,DefectType="Open",Result="BAD",UnitIdx=punches},JsonOptions)+"\n");
+            await Save(Path.Combine(folder,"punch.json"),JsonSerializer.Serialize(new{PunchFlag=1,DefectType="Open",Result="BAD",UnitIdx=punches},JsonOptions).Replace("\r\n","\n").Replace("\n","\r\n")+"\r\n");
             notes.Add("punch.json은 선택 검사에서 DB 증거로 확인한 0 기반 유닛의 합집합입니다. 원래 펀치 설정 전체 목록의 복원을 의미하지 않습니다.");
         }
         else normal.Add(new("punch.json","no_punch_evidence","전체 선택 검사에서 확인된 펀치 증거가 없어 생성하지 않습니다."));
 
         var markers=panels.Where(p=>p.CurrentLayer is not null).Select(p=>p.CurrentLayer!).ToArray();
-        if(markers.Length>0)
+        if(markers.Length>0&&diagnosticFolder is not null)
         {
-            string markerPath=Path.Combine(folder,"_current_layer_marker","RETEST.reference.json");
-            await Save(markerPath,JsonSerializer.Serialize(new{kind="current_layer_reference_only",handlerCompatible=false,
-                historicalInspectionMarker=false,generatedAt=DateTimeOffset.Now,
-                note="현재 조회된 Layer 표식입니다. 선택 검사 당시 RETEST.INI의 복원이 아닙니다.",
-                markers=markers.DistinctBy(x=>(x.Database,x.LayerId,x.Count,x.Suffix))},JsonOptions)+"\n");
+            string markerPath=Path.Combine(diagnosticFolder,"RETEST.reference.json");
+            try
+            {
+                await ExportService.WriteNewAsync(markerPath,JsonSerializer.Serialize(new{kind="current_layer_reference_only",handlerCompatible=false,
+                    historicalInspectionMarker=false,generatedAt=DateTimeOffset.Now,
+                    note="현재 조회된 Layer 표식입니다. 선택 검사 당시 RETEST.INI의 복원이 아닙니다.",
+                    markers=markers.DistinctBy(x=>(x.Database,x.LayerId,x.Count,x.Suffix))},JsonOptions)+"\r\n",ct,Utf8WithoutBom);
+                notes.Add("현재 Layer 표식 참고 자료는 반출 파일에 포함하지 않고 로컬 진단 위치에 보관했습니다: "+markerPath);
+            }
+            catch(Exception error) when(error is not OperationCanceledException){failed.Add(new(markerPath,"local_reference_write_failed",error.Message));}
         }
 
         // NO_DB erases a panel's row when its mask is zero; it does not write '18,'.
@@ -127,11 +132,11 @@ public static class HandlerSidecars
                 failed.Add(new(fileName,"invalid_lot_file_name","원본 LOT를 파일명으로 안전하게 보존할 수 없어 호환 파일 생성을 생략합니다."));
             else
             {
-                var text=new StringBuilder("Panel No,MaskingBar\n");
+                var text=new StringBuilder("Panel No,MaskingBar\r\n");
                 foreach(var group in known.OrderBy(x=>x.Key))
                 {
                     var bars=group.First().MesBars!;
-                    if(bars.Length>0)text.Append(group.Key.ToString(CultureInfo.InvariantCulture)).Append(',').AppendJoin(',',bars).Append('\n');
+                    if(bars.Length>0)text.Append(group.Key.ToString(CultureInfo.InvariantCulture)).Append(',').AppendJoin(',',bars).Append("\r\n");
                 }
                 await Save(Path.Combine(folder,fileName),text.ToString());
             }

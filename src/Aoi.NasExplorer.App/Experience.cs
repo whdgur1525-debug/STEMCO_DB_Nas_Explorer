@@ -1,4 +1,4 @@
-using System.Data;
+﻿using System.Data;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.CompilerServices;
@@ -43,11 +43,11 @@ public partial class MainWindow
         InitializeIdleSession();ScheduleAutoRefresh();
         void FitFilters()
         {
-            bool small=ActualHeight<800;DetailFilterScroll.MaxHeight=Math.Clamp(ActualHeight-650,70,180);ScopeScroll.MaxHeight=small?40:180;
+            bool small=ActualHeight<800;SearchHint.Visibility=small?Visibility.Collapsed:Visibility.Visible;DetailFilterScroll.MaxHeight=Math.Clamp(ActualHeight-650,70,180);ScopeScroll.MaxHeight=small?96:130;
             SummaryLabel.Margin=new Thickness(0,small?2:5,0,small?2:5);
-            foreach(var label in new[]{Breadcrumb,SummaryLabel,ActiveFilterLabel,Notice}){label.TextWrapping=small?TextWrapping.NoWrap:TextWrapping.Wrap;label.TextTrimming=TextTrimming.CharacterEllipsis;}
+            foreach(var label in new[]{Breadcrumb,SummaryLabel,ActiveFilterLabel,Notice}){label.TextWrapping=TextWrapping.NoWrap;label.TextTrimming=TextTrimming.CharacterEllipsis;}
             OpenInspectionsButton.Visibility=OpenDefectsButton.Visibility=small?Visibility.Collapsed:Visibility.Visible;
-            PanelSummary.MaxHeight=LotSummary.MaxHeight=small?85:180;
+            PanelSummary.MaxHeight=LotSummary.MaxHeight=small?70:180;
         }
         SizeChanged+=(_,_)=>FitFilters();FitFilters();
         DetailSearchExpander.Expanded+=(_,_)=>{if(ActualHeight<800)SummaryExpander.IsExpanded=false;};

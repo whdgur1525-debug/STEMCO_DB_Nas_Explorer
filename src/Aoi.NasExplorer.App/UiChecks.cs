@@ -76,7 +76,7 @@ public partial class MainWindow
             await BeginQueryAsync(child.Filter,BrowseLevel.Defects,new[]{database},default);Results.SelectedIndex=0;
             var inspection=(await _repository.QueryAsync(_profile,database,BrowseLevel.Inspections,new(){InspectionId=_filter.InspectionId},1,null,default)).Rows.Single();
             string root=Path.Combine(folder,"actual-panel-bundle");await RunAsync(ct=>RunBundleAsync(root,CreateBundleScopes(BundleMode.Panel,CurrentPanelId()),new(false,false,true,true),ct),true);
-            using var result=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(root,"내보내기결과.json")));
+            using var result=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(_lastDiagnosticFolder!,"내보내기결과.json")));
             if(result.RootElement.GetProperty("panels").GetInt64()!=1||result.RootElement.GetProperty("defects").GetInt64()!=inspection.Long("stored_defect_count")||result.RootElement.GetProperty("failures").GetInt64()!=0)throw new InvalidDataException("Panel bundle count mismatch");
             if(Results.Columns.Any(x=>x.SortMemberPath is "pc_no" or "model_name" or "lot_id_name" or "layer_name"))throw new InvalidDataException("Fixed scope columns were duplicated");
             var start=DateTime.UtcNow;while(DefectImage.Source is null){if((DateTime.UtcNow-start).TotalSeconds>10)throw new TimeoutException("Panel image");await Task.Delay(10);}
@@ -240,7 +240,7 @@ public partial class MainWindow
         {
             Results.SelectedIndex=0;var scopes=CreateBundleScopes(BundleMode.Panel,CurrentPanelId());string root=Path.Combine(folder,"central-panel");
             await RunAsync(ct=>RunBundleAsync(root,scopes,new(true,true,true,true),ct),true);
-            using var result=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(root,"내보내기결과.json")));
+            using var result=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(_lastDiagnosticFolder!,"내보내기결과.json")));
             Assert(result.RootElement.GetProperty("panels").GetInt64()==1&&result.RootElement.GetProperty("defects").GetInt64()==12&&result.RootElement.GetProperty("images").GetInt64()==12&&result.RootElement.GetProperty("failures").GetInt64()==0);
             string layer=Path.Combine(root,"EQ_09","p2411-004d101","agsd","L1-T-SHORT3.1-0200");Assert(File.Exists(Path.Combine(layer,"001.ERT")));
             Assert(Directory.GetFiles(Path.Combine(layer,"1"),"agsd_1_L1-T-SHORT3.1-0200_*.png").Length==12);
@@ -250,14 +250,14 @@ public partial class MainWindow
             await ShowDemoAsync();SearchText.Text="agsd";SearchTargetBox.SelectedIndex=0;await SearchGlobalAsync();SetVisibleChecks(true);
             _view.RefreshSeconds=60;_nextAutoRefreshAt=DateTimeOffset.Now.AddSeconds(-1);var previous=_lastRefresh;await AutoRefreshTickAsync(true);Assert(_lastRefresh==previous&&_checkedRecords.Count==1);_view.RefreshSeconds=0;
             string root=Path.Combine(folder,"central-lot");await RunAsync(ct=>RunBundleAsync(root,CreateBundleScopes(BundleMode.Checked,null),new(true,false,true,false),ct),true);
-            using var result=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(root,"내보내기결과.json")));Assert(result.RootElement.GetProperty("panels").GetInt64()==6&&result.RootElement.GetProperty("defects").GetInt64()==72&&result.RootElement.GetProperty("ertFiles").GetInt64()==6);
+            using var result=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(_lastDiagnosticFolder!,"내보내기결과.json")));Assert(result.RootElement.GetProperty("panels").GetInt64()==6&&result.RootElement.GetProperty("defects").GetInt64()==72&&result.RootElement.GetProperty("ertFiles").GetInt64()==6);
         });
         await Check("new controls describe scope and export without favorite clutter",()=>
         {
             Assert(Navigation.Items.Cast<TreeViewItem>().All(x=>!Convert.ToString(x.Header)!.Contains("즐겨찾기")));
             Assert(Convert.ToString(Results.Columns.Single(x=>x.SortMemberPath=="lot_id").Header)=="Index");
-            var dialog=new BundleWindow(1,BrowseLevel.Lots,null,"LOT 1개 · 패널 전체");Assert(dialog.Mode==BundleMode.Checked&&dialog.Options.Images&&dialog.Options.Counts);
-            var body=(System.Windows.FrameworkElement)dialog.Content;dialog.Content=null;body.Margin=new System.Windows.Thickness(0);
+            var dialog=new BundleWindow(1,BrowseLevel.Lots,null,"LOT 1개 · 패널 전체");Assert(dialog.Mode==BundleMode.Checked&&dialog.Options.Ert&&dialog.Options.Images&&!dialog.Options.Counts&&!dialog.Options.DefectCsv&&!dialog.Options.HandlerFiles&&!dialog.Options.IncludeHistory);
+            var scroller=(ScrollViewer)dialog.Content;var body=(System.Windows.FrameworkElement)scroller.Content;scroller.Content=null;dialog.Content=null;body.Margin=new System.Windows.Thickness(0);
             var frame=new Border{Child=body,Background=System.Windows.Media.Brushes.White,Padding=new System.Windows.Thickness(22)};frame.Measure(new System.Windows.Size(650,double.PositiveInfinity));frame.Arrange(new System.Windows.Rect(0,0,650,frame.DesiredSize.Height));frame.UpdateLayout();
             var bitmap=new RenderTargetBitmap(650,(int)Math.Ceiling(frame.ActualHeight),96,96,PixelFormats.Pbgra32);bitmap.Render(frame);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));using(var stream=File.Create(Path.Combine(folder,"내보내기창.png")))encoder.Save(stream);dialog.Close();return Task.CompletedTask;
         });
@@ -267,7 +267,7 @@ public partial class MainWindow
             var selected=_rows.Take(2).ToArray();string root=Path.Combine(folder,"checked-images-only");
             await RunAsync(ct=>SaveCheckedImagesAsync(root,selected,ct),true);
             Assert(Directory.GetFiles(root,"*.png",SearchOption.AllDirectories).Length==2);
-            using var result=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(root,"결과.json")));
+            using var result=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(_lastDiagnosticFolder!,"결과.json")));
             Assert(result.RootElement.GetProperty("saved").GetInt64()==2&&result.RootElement.GetProperty("selected").GetInt32()==2);
             await ShowDemoAsync();Assert(!ImageInfo.Text.Contains("16384")&&!ImageInfo.Text.Contains("16,384"));
             UpdateResultContextMenu();Assert(!Results.ContextMenu.Items.OfType<MenuItem>().Single(x=>Convert.ToString(x.Tag)=="ert").IsEnabled);
@@ -313,6 +313,30 @@ public partial class MainWindow
             if(Results.ActualHeight<required)throw new InvalidOperationException($"Minimum window needs a full row and scrollbar: {Results.ActualHeight:N1}px < {required:N1}px");
             var visual=(System.Windows.FrameworkElement)Content;var bitmap=new RenderTargetBitmap((int)visual.ActualWidth,(int)visual.ActualHeight,96,96,PixelFormats.Pbgra32);bitmap.Render(visual);var png=new PngBitmapEncoder();png.Frames.Add(BitmapFrame.Create(bitmap));using(var stream=File.Create(Path.Combine(folder,"최소창_필터펼침.png")))png.Save(stream);
             Width=width;Height=height;DetailSearchExpander.IsExpanded=false;
+        });
+        await Check("field layout places exact hierarchy next to table and colors checked rows",async()=>
+        {
+            await ShowDemoAsync(true);double width=Width,height=Height;
+            foreach(var size in new[]{(1500d,940d),(1100d,720d)})
+            {
+                Width=size.Item1;Height=size.Item2;
+                await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.ApplicationIdle);UpdateLayout();
+                var edge=ScopeHeader.TranslatePoint(new System.Windows.Point(0,ScopeHeader.ActualHeight),this);
+                var top=Results.TranslatePoint(new System.Windows.Point(),this);
+                Assert(top.Y-edge.Y>=-1&&top.Y-edge.Y<5);
+                Assert(Results.ActualHeight>Results.ColumnHeaderHeight+Results.RowHeight+System.Windows.SystemParameters.HorizontalScrollBarHeight);
+            }
+            _table.Rows[1]["__checked"]=true;Results.SelectedIndex=0;UpdateLayout();
+            var checkedRow=(DataGridRow)Results.ItemContainerGenerator.ContainerFromIndex(1);Assert(checkedRow.Background is SolidColorBrush color&&color.Color==Color.FromRgb(232,244,238));
+            Width=width;Height=height;
+        });
+        await Check("broad export requires acknowledging concrete selection and fixed plan count",()=>
+        {
+            var scopes=new[]{new BundleScope("DB_A",new(){Model="p2411-004d101",Lot="LOT_A",Layer="L1-T-SHORT3.1-0200"})};
+            string description=DescribeBundleSelection(BundleMode.Query,scopes,new(true,true,false,false));
+            var review=new BundleConfirmWindow(500,BundleMode.Query,description,"C:\\test",new(true,true,false,false));
+            Assert(review.Description.Contains("LOT_A")&&review.Description.Contains("L1-T-SHORT3.1-0200")&&!review.StartButton.IsEnabled);
+            review.Acknowledgement.IsChecked=true;Assert(review.StartButton.IsEnabled);review.Acknowledgement.IsChecked=false;Assert(!review.StartButton.IsEnabled);review.Close();return Task.CompletedTask;
         });
         await Check("modal dialog scope defers idle pause and resets inactivity on return",()=>
         {
