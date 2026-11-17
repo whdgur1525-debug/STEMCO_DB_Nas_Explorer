@@ -28,7 +28,6 @@ public partial class MainWindow
     private readonly List<object> _exportSnapshots=[];
     private DateTimeOffset? _lastRefresh;
     private DateTimeOffset? _lastRefreshAttempt;
-    private DateTimeOffset _lastDiscoveryAt=DateTimeOffset.Now;
     private string? _lastOutput;
     private bool _experienceReady;
     private bool _detailLoading;
@@ -52,7 +51,7 @@ public partial class MainWindow
         }
         SizeChanged+=(_,_)=>FitFilters();FitFilters();
         DetailSearchExpander.Expanded+=(_,_)=>{if(ActualHeight<800)SummaryExpander.IsExpanded=false;};
-        SummaryExpander.Expanded+=(_,_)=>{if(ActualHeight<800)DetailSearchExpander.IsExpanded=false;};
+        SummaryExpander.Expanded+=(_,_)=>{if(ActualHeight<800)DetailSearchExpander.IsExpanded=false;StartSummaryIfNeeded();};
         _refreshTimer.Interval=TimeSpan.FromSeconds(1);
         _refreshTimer.Tick+=async(_,_)=>await AutoRefreshTickAsync();
         _refreshTimer.Start();
@@ -85,7 +84,22 @@ public partial class MainWindow
         bool inheritedMachine=_filter.MachineExact&&filter.Machine==_filter.Machine,inheritedPanel=_filter.MachineExact&&filter.Panel==_filter.Panel;
         return filter with{Model=filter.Model==_filter.Model?"":filter.Model,Lot=filter.Lot==_filter.Lot?"":filter.Lot,Layer=filter.Layer==_filter.Layer?"":filter.Layer,LotId="",LayerId="",InspectionId="",Machine=inheritedMachine?"":filter.Machine,MachineExact=false,Panel=inheritedPanel?null:filter.Panel};
     }
-    private async Task SearchGlobalAsync()=>await RunAsync(ct=>BeginQueryAsync(CreateSearchFilter(),SelectedTarget()==SearchTarget.Model?BrowseLevel.Models:BrowseLevel.Lots,SelectedDatabases(),ct,allDatabases:ScopeBox.SelectedItem is Scope{Database:null}));
+    private async Task SearchGlobalAsync()
+    {
+        await RunAsync(async ct=>
+        {
+            var level=SelectedTarget()==SearchTarget.Model?BrowseLevel.Models:BrowseLevel.Lots;
+            var location=new Location(CreateSearchFilter(),level,SelectedDatabases(),ScopeBox.SelectedItem is Scope{Database:null});
+            if(_trail.Count>1&&SameLocation(location,_trail[0]))
+            {
+                RememberCurrentList();
+                _history.Push(CaptureNavigation());
+                _forward.Clear();
+                await RestoreOrQueryAsync(new NavigationState(location,[location]),ct);
+            }
+            else await BeginQueryAsync(location.Filter,location.Level,location.Databases,ct,allDatabases:location.AllDatabases);
+        });
+    }
     private async void Filter_Click(object sender,RoutedEventArgs e)
     {
         if(_idleLocked||_queryCts is not null)return;
@@ -101,7 +115,7 @@ public partial class MainWindow
     private async void OpenInspections_Click(object sender,RoutedEventArgs e)=>await OpenSelectedAsync(BrowseLevel.Inspections);
     private async void OpenDefects_Click(object sender,RoutedEventArgs e)=>await OpenSelectedAsync(BrowseLevel.Defects);
     private NavigationState CaptureNavigation()=>new(new(_filter,_level,_queryDatabases.ToArray(),_allDatabases),_trail.ToArray()){SelectedKey=Selected()?.Key(_profile.Identity,_level)};
-    private void ResetExperience(){_history.Clear();_forward.Clear();_trail.Clear();_ertAvailability.Clear();_summaryRows.Clear();}
+    private void ResetExperience(){_history.Clear();_forward.Clear();_trail.Clear();_recentLists.Clear();_ertAvailability.Clear();ClearSummary();}
     private void UpdatePath(SearchFilter filter,BrowseLevel level,string[] databases,Location[]? trail,bool allDatabases)
     {
         var next=new Location(filter,level,databases,allDatabases);
@@ -115,38 +129,41 @@ public partial class MainWindow
         if(_idleLocked||_queryCts is not null)return;
         var from=forward?_forward:_history;var to=forward?_history:_forward;
         if(!from.TryPop(out var state))return;
+        RememberCurrentList();
         to.Push(CaptureNavigation());
-        await RunAsync(async ct=>
-        {
-            await BeginQueryAsync(state.Current.Filter,state.Current.Level,state.Current.Databases,ct,false,state.Trail,state.Current.AllDatabases);
-            if(state.SelectedKey is not null)
-            {
-                int index=_rows.FindIndex(x=>x.Key(_profile.Identity,_level)==state.SelectedKey);SelectResultAtSourceIndex(index);
-                if(index<0)Notice.Text+=" · 이전 열람 항목은 첫 페이지에 없습니다. 목록에서 다시 선택하세요.";
-            }
-        });
+        await RunAsync(ct=>RestoreOrQueryAsync(state,ct));
     }
     private async void Forward_Click(object sender,RoutedEventArgs e)=>await NavigateHistoryAsync(true);
     private async void Refresh_Click(object sender,RoutedEventArgs e)=>await RefreshCurrentAsync();
-    private async Task RefreshCurrentAsync(bool rediscover=true)
+    private async Task RefreshCurrentAsync(bool rediscover=false)
     {
-        if(_idleLocked&&!_resuming||_queryCts is not null||_queryDatabases.Count==0)return;
+        if(_idleLocked||_queryCts is not null||!rediscover&&_queryDatabases.Count==0)return;
         var selection=Selected()?.Key(_profile.Identity,_level);var state=CaptureNavigation();var checks=_checkedRecords.ToArray();
+        if(!rediscover)RememberCurrentList();
         ClearImages();_ertAvailability.Clear();
         await RunAsync(async ct=>
         {
             var databases=state.Current.Databases;
+            var trail=state.Trail;
             if(rediscover)
             {
-                _lastDiscoveryAt=DateTimeOffset.Now;
                 bool all=state.Current.AllDatabases;
                 if(_repository is ExplorerRepository repo)repo.ClearSchemaCache();
-                _databases=(await _repository.DiscoverAsync(_profile,ct)).ToList();ConfigureNavigation();
+                _databases=(await DiscoverDatabasesAsync(_repository,_profile,ct)).ToList();
+                _recentLists.Clear();
+                _history.Clear();_forward.Clear();
+                ConfigureNavigation();
                 var found=_databases.Where(x=>x.IsInspection).Select(x=>x.Name).ToArray();
                 databases=all?found:databases.Where(found.Contains).ToArray();
+                trail=trail.Select(step=>step with{Databases=step.AllDatabases?found:step.Databases.Where(found.Contains).ToArray()}).ToArray();
             }
             _restoringChecks=true;
-            try{await BeginQueryAsync(state.Current.Filter,state.Current.Level,databases,ct,false,state.Trail,state.Current.AllDatabases);}
+            try{await BeginQueryAsync(state.Current.Filter,state.Current.Level,databases,ct,false,trail,state.Current.AllDatabases);}
+            catch(OperationCanceledException) when(!rediscover&&_lastRefresh is null&&_recentLists.Any(list=>SameLocation(list.Location,state.Current)))
+            {
+                await RestoreOrQueryAsync(state,CancellationToken.None);
+                throw;
+            }
             finally
             {
                 _restoringChecks=false;var visible=_rows.ToDictionary(CheckKey,StringComparer.Ordinal);
@@ -175,56 +192,183 @@ public partial class MainWindow
         // Do not overwrite an in-progress edit in search/filters or cancel a selected image load.
         if(Keyboard.FocusedElement is TextBox||_detailLoading||_checkedRecords.Count>0)return;
         try{if(ReadFilter()!=_filter||!SelectedDatabases().SequenceEqual(_queryDatabases))return;}catch(ArgumentException){return;}
-        if(DateTimeOffset.Now>=_nextAutoRefreshAt.Value)await RefreshCurrentAsync(_allDatabases&&DateTimeOffset.Now-_lastDiscoveryAt>=TimeSpan.FromMinutes(5));
+        if(DateTimeOffset.Now>=_nextAutoRefreshAt.Value)await RefreshCurrentAsync();
     }
     private void UpdateRefreshLabel()
     {
         if(!_experienceReady)return;
         RefreshLabel.Text=(_lastRefresh.HasValue?$"최근 조회 {_lastRefresh:HH:mm:ss}":"아직 조회하지 않음")+(_exporting?" · 내보내기 중 갱신 일시정지":_view.RefreshSeconds>0?$" · {_view.RefreshSeconds/60}분+분산 대기 · 10분 미사용 시 중지":" · 수동 갱신 (F5)");
     }
-    private async void Databases_Click(object sender,RoutedEventArgs e)
+    private async void Databases_Click(object sender,RoutedEventArgs e)=>await RefreshCurrentAsync(true);
+    private async Task<IReadOnlyList<DatabaseInfo>> DiscoverDatabasesAsync(IExplorerRepository repository,ConnectionProfile profile,CancellationToken ct)
     {
-        await RunAsync(async ct=>
+        var elapsed=Stopwatch.StartNew();
+        try
         {
-            string[] old=_queryDatabases.ToArray();
-            if(_repository is ExplorerRepository repo)repo.ClearSchemaCache();
-            _databases=(await _repository.DiscoverAsync(_profile,ct)).ToList();ConfigureNavigation();
-            var existing=old.Where(x=>_databases.Any(d=>d.IsInspection&&d.Name==x)).ToArray();
-            await BeginQueryAsync(_filter,_level,existing.Length>0?existing:SelectedDatabases(),ct,false,_trail.ToArray());
-        });
+            Status.Text="서버 DB 목록 탐색 중 · 취소 가능";
+            var databases=repository is ExplorerRepository explorer
+                ?await explorer.DiscoverAsync(profile,ct,new Progress<string>(message=>{if(!ct.IsCancellationRequested)Log(message);}))
+                :await repository.DiscoverAsync(profile,ct);
+            Log($"DB 탐색 완료 · 확인 {databases.Count:N0}개 · 검사 DB {databases.Count(db=>db.IsInspection):N0}개 · {elapsed.Elapsed.TotalSeconds:F2}초");
+            return databases;
+        }
+        catch(Exception ex)
+        {
+            Log($"DB 탐색 중단 · {elapsed.Elapsed.TotalSeconds:F2}초 · {ExplorerRepository.SafeError(ex)}");
+            throw;
+        }
     }
-    private async Task LoadSummaryAsync(CancellationToken ct)
+    private sealed record SummarySnapshot(ResultRow[] Panels,ResultRow[] Lots,string Text,bool HasFailures);
+    private SummarySnapshot? _displayedSummary;
+    private CancellationTokenSource? _summaryCts;
+    private Task _summaryTask=Task.CompletedTask;
+
+    private void ClearSummary()
     {
-        _summaryRows.Clear();_lotSummaryRows.Clear();PanelSummary.ItemsSource=LotSummary.ItemsSource=null;SummaryLabel.Text="검색 전체 건수 집계 중…";
-        long lots=0,inspections=0,defects=0,panels=0;var failures=new List<string>();
-        foreach(var db in _queryDatabases)
+        _displayedSummary=null;
+        _summaryRows.Clear();
+        _lotSummaryRows.Clear();
+        PanelSummary.ItemsSource=LotSummary.ItemsSource=null;
+        SummaryLabel.Text="검색 전체 건수 · 조회 대기";
+    }
+
+    private void StopSummary()
+    {
+        if(_summaryCts is not { } cts)return;
+        _summaryCts=null;
+        cts.Cancel();
+        SummaryLabel.Text="전체 건수 집계 중지 · 필요하면 전체 건수 다시 조회";
+    }
+
+    private void StartSummaryIfNeeded()
+    {
+        if(!_idleLocked&&_queryCts is null&&(_displayedSummary is null||_displayedSummary.HasFailures))StartSummary();
+    }
+
+    private void SummaryRefresh_Click(object sender,RoutedEventArgs e)=>StartSummaryIfNeeded();
+
+    private void StartSummary()
+    {
+        if(_idleLocked||_summaryCts is not null||_queryDatabases.Count==0||_lastRefresh is null)return;
+        var cts=new CancellationTokenSource();
+        _summaryCts=cts;
+        SummaryLabel.Text="검색 전체 건수 집계 중… · 목록을 계속 탐색할 수 있습니다";
+        _summaryTask=LoadSummaryAsync(_repository,_profile,_filter,_queryDatabases.ToArray(),cts);
+        UpdateActions();
+    }
+
+    private async Task LoadSummaryAsync(IExplorerRepository repository,ConnectionProfile profile,SearchFilter filter,string[] databases,CancellationTokenSource cts)
+    {
+        try
         {
+            var snapshot=await ReadSummaryAsync(repository,profile,filter,databases,cts.Token);
+            if(!ReferenceEquals(_summaryCts,cts))return;
+            var selection=Selected()?.Key(_profile.Identity,_level);
+            DisplaySummary(snapshot);
+            if(_level==BrowseLevel.Lots)
+            {
+                ApplyLotCounts(_rows);
+                BindRows();
+                _summaryCts=null;
+                RestoreSelection(selection);
+                UpdateActions();
+            }
+        }
+        catch(OperationCanceledException) when(cts.IsCancellationRequested){}
+        catch(Exception ex)
+        {
+            if(ReferenceEquals(_summaryCts,cts))
+            {
+                SummaryLabel.Text="전체 건수 집계 실패 · 작업 기록 확인";
+                Log("전체 건수 집계 실패 · "+ExplorerRepository.SafeError(ex));
+            }
+        }
+        finally
+        {
+            if(ReferenceEquals(_summaryCts,cts))
+            {
+                _summaryCts=null;
+                UpdateActions();
+            }
+            cts.Dispose();
+        }
+    }
+
+    private async Task<SummarySnapshot> ReadSummaryAsync(IExplorerRepository repository,ConnectionProfile profile,SearchFilter filter,string[] databases,CancellationToken ct)
+    {
+        var panelRows=new List<ResultRow>();
+        var lotRows=new List<ResultRow>();
+        long lots=0,inspections=0,defects=0,panels=0;
+        var failures=new List<string>();
+        foreach(var db in databases)
+        {
+            ct.ThrowIfCancellationRequested();
+            var elapsed=Stopwatch.StartNew();
             try
             {
-                var summary=await _repository.SummaryAsync(_profile,db,_filter,ct);ct.ThrowIfCancellationRequested();
-                lots+=summary.Lots;inspections+=summary.Inspections;defects+=summary.Defects;panels+=summary.PanelGroups;
-                _summaryRows.AddRange(summary.Panels);
-                _lotSummaryRows.AddRange(summary.LotCounts);
+                var summary=await repository.SummaryAsync(profile,db,filter,ct);
+                ct.ThrowIfCancellationRequested();
+                lots+=summary.Lots;
+                inspections+=summary.Inspections;
+                defects+=summary.Defects;
+                panels+=summary.PanelGroups;
+                panelRows.AddRange(summary.Panels);
+                lotRows.AddRange(summary.LotCounts);
+                Log($"전체 건수 집계 · {db} · {elapsed.Elapsed.TotalSeconds:F2}초");
             }
-            catch(Exception ex) when(ex is not OperationCanceledException){failures.Add(db);Log("건수 집계 실패 · "+db+": "+ExplorerRepository.SafeError(ex));}
+            catch(Exception ex) when(ex is not OperationCanceledException)
+            {
+                ct.ThrowIfCancellationRequested();
+                failures.Add(db);
+                Log($"건수 집계 실패 · {db} · {elapsed.Elapsed.TotalSeconds:F2}초: {ExplorerRepository.SafeError(ex)}");
+            }
         }
+        string label=failures.Count==databases.Length?"전체 건수 집계 실패 · 작업 기록 확인"
+            :$"검색 일치 불량 {defects:N0}건 · LOT {lots:N0}개 · 검사 기록 {inspections:N0}개 · 패널 그룹 {panels:N0}개";
+        if(failures.Count>0&&failures.Count<databases.Length)
+            label+=$" · 일부 집계 실패 ({failures.Count} DB, 성공한 DB만 합산)";
+        if(panelRows.Count<panels)label+=" · 집계 표는 DB별 최대 1,000그룹";
+        return new(panelRows.ToArray(),lotRows.ToArray(),label,failures.Count>0);
+    }
+
+    private void DisplaySummary(SummarySnapshot summary)
+    {
+        _displayedSummary=summary;
+        _summaryRows.Clear();
+        _summaryRows.AddRange(summary.Panels);
+        _lotSummaryRows.Clear();
+        _lotSummaryRows.AddRange(summary.Lots);
         var table=new DataTable();
         string[] fields=["source_database","model_name","lot_id_name","layer_name","machine_id","panel_no","inspection_count","defect_count","image_count","vms_ng_count","vms_pass_count","lot_id","layer_id"];
         foreach(var field in fields)table.Columns.Add(field,typeof(object));
-        foreach(var row in _summaryRows){var dr=table.NewRow();dr["source_database"]=row.Database;foreach(var field in fields.Skip(1))dr[field]=row[field]??DBNull.Value;table.Rows.Add(dr);}
-        PanelSummary.ItemsSource=table.DefaultView;
-        var lotTable=table.Clone();foreach(var row in _lotSummaryRows){var dr=lotTable.NewRow();dr["source_database"]=row.Database;foreach(var field in fields.Skip(1))dr[field]=row[field]??DBNull.Value;lotTable.Rows.Add(dr);}LotSummary.ItemsSource=lotTable.DefaultView;
-        if(_level==BrowseLevel.Lots)
+        void AddRows(DataTable target,IEnumerable<ResultRow> rows)
         {
-            var counts=_lotSummaryRows.ToDictionary(x=>(x.Database,x.Text("lot_id")));
-            foreach(var row in _rows)
-            {if(counts.TryGetValue((row.Database,row.Text("lot_id")),out var count)){row.Values["inspection_count"]=count["inspection_count"];row.Values["defect_count"]=count["defect_count"];}}
-            BindRows();
+            foreach(var row in rows)
+            {
+                var record=target.NewRow();
+                record["source_database"]=row.Database;
+                foreach(var field in fields.Skip(1))record[field]=row[field]??DBNull.Value;
+                target.Rows.Add(record);
+            }
         }
-        SummaryLabel.Text=$"검색 일치 불량 {defects:N0}건 · LOT {lots:N0}개 · 검사 기록 {inspections:N0}개 · 패널 그룹 {panels:N0}개"+(failures.Count>0?$" · 일부 집계 실패 ({failures.Count} DB)":"");
-        ActiveFilterLabel.Text=DescribeFilters();
-        Notice.Text=(_demo?"예제: 이름은 회수 자료 기준, 수량·좌표·이미지는 연습용입니다. ":"")+"건수는 검색 전체 · 재검 기록 포함 · 열 정렬은 현재 표시분 기준"+(_summaryRows.Count<panels?$" · 집계 표는 DB별 최대 1,000그룹 표시 (전체 {panels:N0}).":"");
-        if(_failedDatabases.Count>0)Notice.Text+=" · 목록 조회 실패 DB 있음: 작업 기록 확인";
+        AddRows(table,_summaryRows);
+        PanelSummary.ItemsSource=table.DefaultView;
+        var lotTable=table.Clone();
+        AddRows(lotTable,_lotSummaryRows);
+        LotSummary.ItemsSource=lotTable.DefaultView;
+        SummaryLabel.Text=summary.Text;
+    }
+
+    private void ApplyLotCounts(IEnumerable<ResultRow> rows)
+    {
+        if(_level!=BrowseLevel.Lots||_lotSummaryRows.Count==0)return;
+        var counts=_lotSummaryRows.ToDictionary(row=>(row.Database,row.Text("lot_id")));
+        foreach(var row in rows)
+            if(counts.TryGetValue((row.Database,row.Text("lot_id")),out var count))
+            {
+                row.Values["inspection_count"]=count["inspection_count"];
+                row.Values["defect_count"]=count["defect_count"];
+            }
     }
     private async void PanelSummary_DoubleClick(object sender,MouseButtonEventArgs e)
     {
@@ -276,7 +420,7 @@ public partial class MainWindow
         Enable(SaveImageButton,!busy&&_image is {Bytes.Length:>0},"표시 중인 이미지 원본과 열람용 PNG를 저장합니다.");
         Enable(SummaryCsvButton,ready&&(_summaryRows.Count>0||_lotSummaryRows.Count>0),"선택한 탭의 집계 표를 저장합니다. 각 표는 DB별 최대 1,000개입니다.");
         Enable(OpenOutputButton,!busy&&_lastOutput is not null,"최근 내보내기 저장 폴더를 엽니다.");
-        RefreshButton.IsEnabled=ready;CancelButton.IsEnabled=busy;SearchButton.IsEnabled=!busy;DatabasesButton.IsEnabled=ready;MoreButton.IsEnabled=ready&&_hasMore;
+        RefreshButton.IsEnabled=ready;CancelButton.IsEnabled=busy||_summaryCts is not null;SearchButton.IsEnabled=!busy;DatabasesButton.IsEnabled=!busy&&_databases.Count>0;SummaryRefreshButton.IsEnabled=ready&&_summaryCts is null&&(_displayedSummary is null||_displayedSummary.HasFailures);MoreButton.IsEnabled=ready&&_hasMore;
         BundleButton.IsEnabled=ready&&(_rows.Count>0||_checkedRecords.Count>0);ReviewChecksButton.IsEnabled=ready&&_checkedRecords.Count>0;
         Navigation.IsEnabled=Results.IsEnabled=PanelSummary.IsEnabled=LotSummary.IsEnabled=PathPanel.IsEnabled=!busy;
         foreach(var control in new Control[]{ScopeBox,SearchTargetBox,SearchText,AutoRefreshBox,ModelText,LotText,LayerText,MachineText,PanelText,PcText,DefectText,VmsText,AiText,CauseCodeText,CauseText,MinSizeText,MaxSizeText,FromDate,ToDate,StateBox,ImageFilterBox})control.IsEnabled=!busy;

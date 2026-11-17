@@ -1,4 +1,5 @@
 ﻿using System.Data;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
@@ -19,6 +20,8 @@ namespace Aoi.NasExplorer.App;
 public partial class MainWindow : Window
 {
     private ConnectionProfile _profile=new();
+    private bool _rememberPassword;
+    private string? _passwordWarning;
     private IExplorerRepository _repository=new ExplorerRepository();
     private List<DatabaseInfo> _databases=[];
     private readonly List<ResultRow> _rows=[];
@@ -56,7 +59,20 @@ public partial class MainWindow : Window
         InitializeComponent();_smoke=smoke;
         VersionLabel.Text="읽기 전용  ·  v"+typeof(MainWindow).Assembly.GetName().Version?.ToString(3);
         Title="Synapse NAS Explorer "+typeof(MainWindow).Assembly.GetName().Version?.ToString(3)+" · 검사 결과 조회";
-        if(!smoke)try{_profile=ProfileStore.Load();_view=ProfileStore.LoadView();Width=Math.Clamp(_view.Width,1100,3000);Height=Math.Clamp(_view.Height,720,2000);}catch(Exception ex){Log("연결·화면 설정을 읽지 못했습니다: "+ex.Message);}
+        if(!smoke)
+        {
+            try
+            {
+                var stored=ProfileStore.Load();
+                (_profile,_rememberPassword,_passwordWarning)=(stored.Profile,stored.Remember,stored.Warning);
+                if(stored.Warning is not null)Log(stored.Warning);
+            }
+            catch(Exception ex) when(ex is IOException or UnauthorizedAccessException or JsonException)
+            {Log("연결 설정을 읽지 못했습니다: "+ex.Message);}
+            try{_view=ProfileStore.LoadView();Width=Math.Clamp(_view.Width,1100,3000);Height=Math.Clamp(_view.Height,720,2000);}
+            catch(Exception ex) when(ex is IOException or UnauthorizedAccessException or JsonException)
+            {Log("화면 설정을 읽지 못했습니다: "+ex.Message);}
+        }
         InitializeExperience();
     }
     private void Log(string text)
@@ -68,8 +84,9 @@ public partial class MainWindow : Window
     }
     private async Task RunAsync(Func<CancellationToken,Task> action,bool export=false)
     {
-        if(_idleLocked&&!_resuming)return;
+        if(_idleLocked)return;
         if(_exporting){Status.Text="추출 중입니다. 완료하거나 취소한 뒤 이동하세요.";return;}
+        StopSummary();
         _queryCts?.Cancel();var cts=new CancellationTokenSource();_queryCts=cts;_exporting=export;
         if(export){_detailCts?.Cancel();_exportSnapshots.Clear();ExportProgressPanel.Visibility=Visibility.Visible;ExportProgress.IsIndeterminate=true;ExportProgressLabel.Text="내보내기 대상 확인 중…";StopExportButton.Visibility=Visibility.Visible;StopExportButton.IsEnabled=true;}
         UpdateActions();
@@ -92,7 +109,7 @@ public partial class MainWindow : Window
     private async void Connect_Click(object sender,RoutedEventArgs e)
     {
         if(_exporting)return;
-        var dialog=new ConnectionWindow(_profile){Owner=this};if(ShowModal(()=>dialog.ShowDialog())!=true||dialog.Profile is null)return;
+        var dialog=new ConnectionWindow(_profile,_rememberPassword,_passwordWarning){Owner=this};if(ShowModal(()=>dialog.ShowDialog())!=true||dialog.Profile is null)return;
         var next=dialog.Profile;
         await ConnectProfileAsync(next,dialog.Remember);
     }
@@ -100,16 +117,18 @@ public partial class MainWindow : Window
     {
         if(_profile.Host is not ("127.0.0.1" or "localhost" or "::1"))
         {Notice.Text="로컬 시작은 이 PC의 DB에만 연결합니다. NAS 연결 버튼에서 접속정보를 확인하세요.";return;}
-        await ConnectProfileAsync(_profile,true);
+        await ConnectProfileAsync(_profile,_rememberPassword);
     }
     private async Task ConnectProfileAsync(ConnectionProfile next,bool remember)
     {
         await RunAsync(async ct=>
         {
             var repo=new ExplorerRepository();IReadOnlyList<DatabaseInfo> found;
-            try{found=await repo.DiscoverAsync(next,ct);ct.ThrowIfCancellationRequested();}catch{repo.Dispose();throw;}
+            try{found=await DiscoverDatabasesAsync(repo,next,ct);ct.ThrowIfCancellationRequested();}catch{repo.Dispose();throw;}
             _detailCts?.Cancel();if(_repository is IDisposable previousRepository)previousRepository.Dispose();
             _repository=repo;_profile=next;_demo=false;_databases=found.ToList();ResetExperience();ClearImages();
+            _rememberPassword=remember;
+            _passwordWarning=null;
             var initial=new SearchFilter{Target=SelectedTarget()};_checkedRecords.Clear();_rows.Clear();_queryDatabases.Clear();_filter=initial;_clearFolderContext=true;
             _level=initial.Target==SearchTarget.Model?BrowseLevel.Models:BrowseLevel.Lots;LevelBox.SelectedIndex=(int)_level;ShowFilterInputs(initial);BindRows();
             DefectImage.Source=null;Details.ItemsSource=null;DetailSource.Text="새 연결에서 조회할 기록을 선택하세요.";
@@ -212,11 +231,28 @@ public partial class MainWindow : Window
     private async void SearchText_KeyDown(object sender,KeyEventArgs e){if(e.Key==Key.Enter){e.Handled=true;await SearchGlobalAsync();}}
     private async Task BeginQueryAsync(SearchFilter filter,BrowseLevel level,IEnumerable<string> databases,CancellationToken ct,bool history=true,Location[]? trail=null,bool allDatabases=false)
     {
-        if(!_exporting)ExportProgressPanel.Visibility=Visibility.Collapsed;
+        if(history&&_queryDatabases.Count>0)
+        {
+            RememberCurrentList();
+            _history.Push(CaptureNavigation());
+            _forward.Clear();
+        }
+        StopSummary();
         _lastRefreshAttempt=DateTimeOffset.Now;
-        int clearedChecks=_checkedRecords.Count;_checkedRecords.Clear();
-        _summaryRows.Clear();_lotSummaryRows.Clear();PanelSummary.ItemsSource=LotSummary.ItemsSource=null;SummaryLabel.Text="조회·전체 건수 집계 중…";
-        if(history&&_queryDatabases.Count>0){_history.Push(CaptureNavigation());_forward.Clear();}
+        int clearedChecks=_checkedRecords.Count;
+        PrepareList(filter,level,databases,trail,allDatabases);
+        BindRows();await LoadPageAsync(ct);
+        ct.ThrowIfCancellationRequested();
+        if(clearedChecks>0&&!_restoringChecks)Notice.Text+=$" · 검색·경로 변경으로 이전 체크 {clearedChecks:N0}개 해제";
+        _lastRefresh=DateTimeOffset.Now;ScheduleAutoRefresh();UpdateRefreshLabel();UpdateActions();
+        StartSummary();
+    }
+    private void PrepareList(SearchFilter filter,BrowseLevel level,IEnumerable<string> databases,Location[]? trail,bool allDatabases)
+    {
+        if(!_exporting)ExportProgressPanel.Visibility=Visibility.Collapsed;
+        _checkedRecords.Clear();
+        ClearSummary();
+        _lastRefresh=null;
         if(allDatabases)filter=filter with{LotId="",LayerId="",InspectionId=""};
         UpdatePath(filter,level,databases.ToArray(),trail,allDatabases);
         _detailCts?.Cancel();_filter=filter;_level=level;_allDatabases=allDatabases;LevelBox.SelectedIndex=(int)level;_queryDatabases=databases.ToList();_databaseIndex=0;_cursor=null;_hasMore=_queryDatabases.Count>0;_rows.Clear();_failedDatabases.Clear();ThumbnailPanel.Children.Clear();
@@ -224,37 +260,39 @@ public partial class MainWindow : Window
         DefectImage.Source=null;_image=null;ImagePlaceholder.Visibility=Visibility.Visible;ImagePlaceholder.Text="불량을 선택하면 이미지를 표시합니다";ImageInfo.Text="휠로 확대 · 스크롤로 이동 · 방향키로 목록 이동";Details.ItemsSource=null;
         Breadcrumb.Text=$"DB: {(_queryDatabases.Count==1?_queryDatabases[0]:"전체 검사 DB")} · 현재 목록: {LevelNames[(int)level]}";
         RenderScopePath();
+        ActiveFilterLabel.Text=DescribeFilters();
         Notice.Text=_demo?"예제 데이터입니다. 실제 검사 결과가 아닙니다.":"DB별 순차 조회 · 열 정렬은 현재 표시된 목록에 적용 · NULL / 없는 컬럼은 상세에서 구분";
-        BindRows();await LoadPageAsync(ct);await LoadSummaryAsync(ct);
-        if(clearedChecks>0&&!_restoringChecks)Notice.Text+=$" · 검색·경로 변경으로 이전 체크 {clearedChecks:N0}개 해제";
-        _lastRefresh=DateTimeOffset.Now;ScheduleAutoRefresh();UpdateRefreshLabel();UpdateActions();
     }
     private async Task LoadPageAsync(CancellationToken ct)
     {
         var selection=Selected()?.Key(_profile.Identity,_level);
-        if(_queryDatabases.Count==0){Notice.Text="연결 가능한 검사 DB가 없습니다. NAS 연결과 DB 권한을 확인하세요.";_hasMore=false;return;}
+        if(_queryDatabases.Count==0){Notice.Text="현재 범위에 조회할 수 있는 검사 DB가 없습니다. 탐색 옆 ↻로 DB 목록을 다시 확인하세요.";CountLabel.Text="현재 목록 0개";_hasMore=false;return;}
         while(_databaseIndex<_queryDatabases.Count)
         {
             string db=_queryDatabases[_databaseIndex];
+            var elapsed=Stopwatch.StartNew();
             try
             {
                 var page=await _repository.QueryAsync(_profile,db,_level,_filter,250,_cursor,ct);ct.ThrowIfCancellationRequested();
                 if(_rows.Count>=5000){_rows.Clear();Log("표시 목록 5,000개를 넘겨 다음 구간으로 이동했습니다. 전체 결과는 CSV로 추출할 수 있습니다.");}
+                ApplyLotCounts(page.Rows);
                 _rows.AddRange(page.Rows);_cursor=page.Cursor;
+                Log($"목록 조회 · {db} · {LevelNames[(int)_level]} · {page.Rows.Count:N0}행 · {elapsed.Elapsed.TotalSeconds:F2}초");
                 if(!page.HasMore){_databaseIndex++;_cursor=null;}
                 _hasMore=_databaseIndex<_queryDatabases.Count;BindRows();
                 if(selection is not null)SelectResultAtSourceIndex(_rows.FindIndex(row=>row.Key(_profile.Identity,_level)==selection));
                 if(page.Rows.Count>0)break;
             }
             catch(Exception ex) when(ex is not OperationCanceledException)
-            {_failedDatabases.Add(db);Log($"{db} 조회 실패: {ExplorerRepository.SafeError(ex)}");Notice.Text=$"일부 DB 조회 실패: {string.Join(", ",_failedDatabases)} · 작업 기록 확인";_databaseIndex++;_cursor=null;}
+            {_failedDatabases.Add(db);Log($"{db} 목록 조회 실패 · {elapsed.Elapsed.TotalSeconds:F2}초: {ExplorerRepository.SafeError(ex)}");Notice.Text=$"일부 DB 조회 실패: {string.Join(", ",_failedDatabases)} · 작업 기록 확인";_databaseIndex++;_cursor=null;}
         }
         _hasMore=_databaseIndex<_queryDatabases.Count;MoreButton.IsEnabled=_hasMore&&_queryCts is null;
         CountLabel.Text=$"현재 목록 {_rows.Count:N0}개 · {(_hasMore?"추가 결과 있음":"조회 범위 끝")}"+(_failedDatabases.Count>0?$" · 실패 DB {_failedDatabases.Count}개":"");
     }
-    private void BindRows()
+    private void BindRows(IReadOnlyList<System.ComponentModel.SortDescription>? savedSort=null)
     {
         RememberResultSort();
+        if(savedSort is not null)_resultSort=savedSort.ToList();
         RememberColumns();
         _table=new DataTable();_table.Columns.Add("__index",typeof(int));_table.Columns.Add("source_database",typeof(string));
         _table.Columns.Add("__checked",typeof(bool));
@@ -302,6 +340,7 @@ public partial class MainWindow : Window
         _detailLoading=false;
         _image=null;DefectImage.Source=null;ImagePlaceholder.Visibility=Visibility.Visible;ImagePlaceholder.Text="불량을 선택하면 이미지를 표시합니다";ImageInfo.Text="불량 목록에서 기록을 선택하면 이미지 정보를 표시합니다";
         if(Selected() is not ResultRow row)return;
+        if(_queryCts is null){StopSummary();UpdateActions();}
         _detailLoading=true;
         ImagePlaceholder.Text="선택한 기록 읽는 중…";if(_level==BrowseLevel.Defects)ImageInfo.Text="선택한 기록의 이미지 확인 중…";
         try
@@ -343,7 +382,7 @@ public partial class MainWindow : Window
     private void ZoomIn_Click(object sender,RoutedEventArgs e)=>SetZoom(ImageScale.ScaleX*1.25);
     private void Actual_Click(object sender,RoutedEventArgs e)=>SetZoom(1);
     private void Fit_Click(object sender,RoutedEventArgs e)=>FitImage();
-    private void Cancel_Click(object sender,RoutedEventArgs e){_queryCts?.Cancel();_detailCts?.Cancel();}
+    private void Cancel_Click(object sender,RoutedEventArgs e){_queryCts?.Cancel();_detailCts?.Cancel();StopSummary();UpdateActions();}
     private async void Back_Click(object sender,RoutedEventArgs e)=>await NavigateHistoryAsync(false);
     private void RememberColumns()
     {
@@ -541,7 +580,7 @@ public partial class MainWindow : Window
             },ct);
         });
     }
-    private void Window_Closing(object? sender,System.ComponentModel.CancelEventArgs e){InputManager.Current.PreProcessInput-=AppInput;_refreshTimer.Stop();_queryCts?.Cancel();_detailCts?.Cancel();SaveView();if(_repository is IDisposable disposable)disposable.Dispose();}
+    private void Window_Closing(object? sender,System.ComponentModel.CancelEventArgs e){InputManager.Current.PreProcessInput-=AppInput;_refreshTimer.Stop();_queryCts?.Cancel();_detailCts?.Cancel();StopSummary();SaveView();if(_repository is IDisposable disposable)disposable.Dispose();}
 }
 
 internal sealed class DisplayConverter : System.Windows.Data.IValueConverter

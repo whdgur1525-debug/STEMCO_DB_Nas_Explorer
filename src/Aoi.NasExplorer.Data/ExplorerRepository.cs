@@ -109,16 +109,19 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
         return fields;
     }
     public void ClearSchemaCache() => _schemas.Clear();
-    public async Task<IReadOnlyList<DatabaseInfo>> DiscoverAsync(ConnectionProfile p, CancellationToken ct)
+    public Task<IReadOnlyList<DatabaseInfo>> DiscoverAsync(ConnectionProfile p,CancellationToken ct)=>DiscoverAsync(p,ct,null);
+
+    public async Task<IReadOnlyList<DatabaseInfo>> DiscoverAsync(ConnectionProfile p,CancellationToken ct,IProgress<string>? progress)
     {
         await ReleaseIdleConnectionsAsync();
-        var result = new List<DatabaseInfo>();
+        var timer=System.Diagnostics.Stopwatch.StartNew();
         await using var c = await OpenAsync(p, p.ManagementDatabase, ct,false);
         var names = new List<string>();
         await using (var cmd = new NpgsqlCommand("SELECT datname FROM pg_database WHERE NOT datistemplate AND datallowconn ORDER BY datname COLLATE \"C\" DESC", c))
         await using (var r = await cmd.ExecuteReaderAsync(ct))
             while (await r.ReadAsync(ct)) names.Add(r.GetString(0));
         await c.CloseAsync();
+        progress?.Report($"DB 이름 확인 · {names.Count:N0}개 · {timer.Elapsed.TotalSeconds:F2}초");
         var states = new Dictionary<string, string>(StringComparer.Ordinal);
         string? statusError = null;
         try
@@ -128,22 +131,36 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
             await using var r = await cmd.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct)) states[r.GetString(0)] = r.IsDBNull(1) ? "미기록" : r.GetString(1);
         }
-        catch (Exception ex) when (ex is NpgsqlException or TimeoutException) { statusError = "DB 상태 조회 불가 (aoi_config)"; }
-        foreach (string name in names)
+        catch (Exception ex) when (ex is NpgsqlException or TimeoutException)
         {
             ct.ThrowIfCancellationRequested();
+            statusError="DB 상태 조회 불가 (aoi_config)";
+            progress?.Report($"{statusError} · {SafeError(ex)}");
+        }
+        var result=new DatabaseInfo?[names.Count];
+        await Parallel.ForEachAsync(Enumerable.Range(0,names.Count),
+            new ParallelOptions{MaxDegreeOfParallelism=2,CancellationToken=ct},async(index,token)=>
+        {
+            string name=names[index];
+            var elapsed=System.Diagnostics.Stopwatch.StartNew();
             try
             {
-                await using var db = await OpenAsync(p, name, ct,false);
-                var schema = await SchemaAsync(p, db, ct);
+                await using var db=await OpenAsync(p,name,token,false);
+                var schema=await SchemaAsync(p,db,token);
                 bool inspection = new[] {"lot_id.lot_id", "layer.layer", "inspection.inspection", "defects.defects"}.All(schema.ContainsKey);
                 if (inspection || name.StartsWith("aoi_", StringComparison.Ordinal) || name == p.ManagementDatabase)
-                    result.Add(new(name, states.GetValueOrDefault(name, "미등록"), inspection, statusError));
+                    result[index]=new(name,states.GetValueOrDefault(name,"미등록"),inspection,statusError);
+                progress?.Report($"DB 스키마 확인 · {name} · {(inspection?"검사 DB":"검사 DB 아님")} · {elapsed.Elapsed.TotalSeconds:F2}초");
             }
             catch (Exception ex) when (ex is NpgsqlException or TimeoutException)
-            { result.Add(new(name, states.GetValueOrDefault(name, "알 수 없음"), false, SafeError(ex))); }
-        }
-        return result;
+            {
+                token.ThrowIfCancellationRequested();
+                string error=SafeError(ex);
+                result[index]=new(name,states.GetValueOrDefault(name,"알 수 없음"),false,error);
+                progress?.Report($"DB 스키마 확인 실패 · {name} · {elapsed.Elapsed.TotalSeconds:F2}초 · {error}");
+            }
+        });
+        return result.OfType<DatabaseInfo>().ToArray();
     }
     public static string SafeError(Exception ex) => ex switch
     {

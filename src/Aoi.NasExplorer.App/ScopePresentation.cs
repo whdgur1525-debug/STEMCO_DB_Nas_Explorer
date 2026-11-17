@@ -78,13 +78,13 @@ public partial class MainWindow
         if(_trail.Count>1)
         {
             var root=_trail[0];var back=new Button{Content="검색 결과",Padding=new Thickness(4,2,4,2),Margin=new Thickness(0),ToolTip="처음 검색했던 조건으로 돌아갑니다"};
-            back.Click+=async(_,_)=>{if(_queryCts is null)await RunAsync(ct=>BeginQueryAsync(root.Filter,root.Level,root.Databases,ct,true,new[]{root},root.AllDatabases));};PathPanel.Children.Add(back);
+            back.Click+=async(_,_)=>await ReturnToPathAsync(root,[root]);PathPanel.Children.Add(back);
         }
         void Part(string label,SearchFilter target,BrowseLevel level,bool enabled)
         {
             PathPanel.Children.Add(new TextBlock{Text=" / ",Foreground=System.Windows.Media.Brushes.Gray});
             var button=new Button{Content=label,Padding=new Thickness(6,4,6,4),Margin=new Thickness(0,3,0,0),BorderThickness=new Thickness(0),Background=System.Windows.Media.Brushes.White,Foreground=new SolidColorBrush(Color.FromRgb(30,64,130)),FontWeight=FontWeights.SemiBold,IsEnabled=enabled,ToolTip=label+" · 이 범위의 목록으로 이동"};
-            button.Click+=async(_,_)=>{if(_queryCts is null)await RunAsync(ct=>BeginQueryAsync(target,level,_queryDatabases.ToArray(),ct,allDatabases:_allDatabases));};PathPanel.Children.Add(button);
+            button.Click+=async(_,_)=>await ReturnToPathPartAsync(target,level);PathPanel.Children.Add(button);
         }
         Part("Model ("+(f.Model.Length>0?f.Model:"전체")+")",f with{Lot="",LotId="",Layer="",LayerId="",InspectionId="",Panel=null,Text=""},f.Model.Length>0?BrowseLevel.Lots:BrowseLevel.Models,true);
         Part("LotID ("+(f.Lot.Length>0?f.Lot:"전체")+")",f with{Layer="",LayerId="",InspectionId="",Panel=null},f.Lot.Length>0?BrowseLevel.Layers:BrowseLevel.Lots,true);

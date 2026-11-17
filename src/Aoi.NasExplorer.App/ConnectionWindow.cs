@@ -8,7 +8,7 @@ internal sealed class ConnectionWindow : Window
 {
     public ConnectionProfile? Profile {get;private set;}
     public bool Remember {get;private set;}
-    public ConnectionWindow(ConnectionProfile previous)
+    public ConnectionWindow(ConnectionProfile previous,bool rememberPassword=false,string? passwordWarning=null)
     {
         Title="NAS DB 연결";Width=510;SizeToContent=SizeToContent.Height;ResizeMode=ResizeMode.NoResize;WindowStartupLocation=WindowStartupLocation.CenterOwner;
         var panel=new StackPanel{Margin=new Thickness(24)}; Content=panel;
@@ -24,8 +24,21 @@ internal sealed class ConnectionWindow : Window
         panel.Children.Add(new TextBlock{Text="TLS 방식",Margin=new Thickness(3,6,0,0)});
         var ssl=new ComboBox{ItemsSource=new[]{"Prefer","Require","VerifyCA","VerifyFull","Disable"},SelectedItem=previous.SslMode};panel.Children.Add(ssl);
         var certificate=Box("CA 인증서 경로 (필요할 때만)",previous.RootCertificate);
-        var remember=new CheckBox{Content="이 Windows 계정에 비밀번호 암호화 저장",IsChecked=false};panel.Children.Add(remember);
-        var error=new TextBlock{TextWrapping=TextWrapping.Wrap,Foreground=System.Windows.Media.Brushes.Firebrick,Margin=new Thickness(3)};panel.Children.Add(error);
+        var remember=new CheckBox{Content="이 Windows 계정에 비밀번호 암호화 저장",IsChecked=rememberPassword};panel.Children.Add(remember);
+        var error=new TextBlock{Text=passwordWarning??"",TextWrapping=TextWrapping.Wrap,Foreground=System.Windows.Media.Brushes.Firebrick,Margin=new Thickness(3)};panel.Children.Add(error);
+        bool usingPreviousPassword=previous.Password.Length>0;
+        password.PasswordChanged+=(_,_)=>usingPreviousPassword=false;
+        void ClearPreviousPassword(object sender,TextChangedEventArgs e)
+        {
+            if(!usingPreviousPassword)return;
+            if(host.Text.Trim().Equals(previous.Host,StringComparison.OrdinalIgnoreCase)
+                &&int.TryParse(port.Text,out var portNumber)&&portNumber==previous.Port
+                &&user.Text.Trim()==previous.Username)return;
+            password.Clear();
+        }
+        host.TextChanged+=ClearPreviousPassword;
+        port.TextChanged+=ClearPreviousPassword;
+        user.TextChanged+=ClearPreviousPassword;
         var buttons=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};panel.Children.Add(buttons);
         var cancel=new Button{Content="취소",IsCancel=true};buttons.Children.Add(cancel);var connect=new Button{Content="연결",IsDefault=true};buttons.Children.Add(connect);
         connect.Click+=(_,_)=>

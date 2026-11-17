@@ -8,25 +8,45 @@ using Aoi.NasExplorer.Core;
 
 namespace Aoi.NasExplorer.App;
 
+internal sealed record StoredConnection(ConnectionProfile Profile,bool Remember,string? Warning=null);
+
 internal sealed class ProfileStore
 {
     private static readonly string Folder=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Synapse","NasExplorer");
     private sealed record Saved(ConnectionProfile Profile,string? Secret);
-    public static ConnectionProfile Load()
+    public static StoredConnection Load(string? folder=null)
     {
-        string path=Path.Combine(Folder,"connection.json");
-        if(!File.Exists(path))return new();
+        string path=Path.Combine(folder??Folder,"connection.json");
+        if(!File.Exists(path))return new(new(),false);
         var saved=JsonSerializer.Deserialize<Saved>(File.ReadAllText(path))??throw new InvalidDataException("연결 설정이 비어 있습니다.");
         string password="";
-        if(saved.Secret is not null)
+        if(saved.Secret is null)return new(saved.Profile with{Password=""},false);
+        try
+        {
             password=Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(saved.Secret),null,DataProtectionScope.CurrentUser));
-        return saved.Profile with{Password=password};
+            return new(saved.Profile with{Password=password},true);
+        }
+        catch(Exception ex) when(ex is CryptographicException or FormatException)
+        {
+            return new(saved.Profile with{Password=""},true,"저장한 비밀번호를 이 Windows 계정에서 읽을 수 없습니다. 비밀번호를 다시 입력하세요.");
+        }
     }
-    public static void Save(ConnectionProfile profile,bool remember)
+    public static void Save(ConnectionProfile profile,bool remember,string? folder=null)
     {
-        Directory.CreateDirectory(Folder);
+        string target=folder??Folder;
+        Directory.CreateDirectory(target);
         string? secret=remember?Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(profile.Password),null,DataProtectionScope.CurrentUser)):null;
-        File.WriteAllText(Path.Combine(Folder,"connection.json"),JsonSerializer.Serialize(new Saved(profile with{Password=""},secret),new JsonSerializerOptions{WriteIndented=true}));
+        string path=Path.Combine(target,"connection.json");
+        string temporary=Path.Combine(target,Guid.NewGuid().ToString("N")+".tmp");
+        try
+        {
+            File.WriteAllText(temporary,JsonSerializer.Serialize(new Saved(profile with{Password=""},secret),new JsonSerializerOptions{WriteIndented=true}));
+            File.Move(temporary,path,true);
+        }
+        finally
+        {
+            if(File.Exists(temporary))File.Delete(temporary);
+        }
     }
     public static void AppendLog(string text)
     {

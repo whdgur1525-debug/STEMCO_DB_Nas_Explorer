@@ -8,7 +8,7 @@ public partial class MainWindow
 {
     private DateTimeOffset _lastUserInteraction=DateTimeOffset.Now;
     private DateTimeOffset? _nextAutoRefreshAt;
-    private bool _idleLocked,_resuming;
+    private bool _idleLocked;
     private int _modalDepth;
     private static readonly TimeSpan IdleLimit=TimeSpan.FromMinutes(10);
     private void InitializeIdleSession()
@@ -36,22 +36,23 @@ public partial class MainWindow
         if(_modalDepth>0)return false;
         if(_exporting||DateTimeOffset.Now-_lastUserInteraction<IdleLimit)return false;
         if(_queryCts is not null){_queryCts.Cancel();return true;}
-        _idleLocked=true;_detailCts?.Cancel();_view.RefreshSeconds=0;AutoRefreshBox.SelectedIndex=0;_nextAutoRefreshAt=null;SaveView();
+        _idleLocked=true;StopSummary();_detailCts?.Cancel();_view.RefreshSeconds=0;AutoRefreshBox.SelectedIndex=0;_nextAutoRefreshAt=null;SaveView();
         foreach(FrameworkElement child in ((System.Windows.Controls.Panel)Content).Children)if(!ReferenceEquals(child,IdleOverlay))child.IsEnabled=false;
         IdleOverlay.Visibility=Visibility.Visible;ResumeButton.Focus();
         if(_repository is ExplorerRepository repo)await repo.ReleaseIdleConnectionsAsync();
-        Log("10분 미사용 · 자동 갱신 중지 · 조회 연결 정리 · 다시 조회 대기");return true;
+        Log("10분 미사용 · 자동 갱신 중지 · 조회 연결 정리 · 목록 복귀 대기");return true;
     }
-    private async Task ResumeSessionAsync()
+    private Task ResumeSessionAsync()
     {
-        if(!_idleLocked||_resuming)return;_resuming=true;
-        try
-        {
-            _lastUserInteraction=DateTimeOffset.Now;await RefreshCurrentAsync();_idleLocked=false;IdleOverlay.Visibility=Visibility.Collapsed;
-            foreach(FrameworkElement child in ((System.Windows.Controls.Panel)Content).Children)if(!ReferenceEquals(child,IdleOverlay))child.IsEnabled=true;
-            UpdateActions();
-        }
-        finally{_resuming=false;_lastUserInteraction=DateTimeOffset.Now;}
+        if(!_idleLocked)return Task.CompletedTask;
+        _lastUserInteraction=DateTimeOffset.Now;
+        _idleLocked=false;
+        IdleOverlay.Visibility=Visibility.Collapsed;
+        foreach(FrameworkElement child in ((System.Windows.Controls.Panel)Content).Children)
+            if(!ReferenceEquals(child,IdleOverlay))child.IsEnabled=true;
+        Notice.Text=_lastRefresh is DateTimeOffset readAt?$"이전 목록 · {readAt:HH:mm:ss} 조회분 · 최신 결과는 F5":"조회가 다시 활성화되었습니다.";
+        UpdateActions();
+        return Task.CompletedTask;
     }
     private async void Resume_Click(object sender,RoutedEventArgs e)=>await ResumeSessionAsync();
 }
