@@ -121,16 +121,24 @@ public partial class MainWindow
         try{scopes=CreateBundleScopes(dialog.Mode,panelId);}
         catch(Exception ex){Notice.Text="내보내기 범위 확인 실패: "+ex.Message;return;}
         string root=Path.Combine(dialog.Folder,"검사결과_"+DateTime.Now.ToString("yyyyMMdd_HHmmss")+"_"+Guid.NewGuid().ToString("N")[..6]);
-        string description=DescribeBundleSelection(dialog.Mode,scopes,dialog.Options)+"\n\n"+dialog.SelectionDescription;
-        await RunAsync(ct=>RunBundleAsync(root,scopes,dialog.Options,ct,plan=>
+        await RunAsync(async ct=>
         {
+            if(dialog.Mode==BundleMode.Query)
+            {
+                var verified=(await ResolveInspectionDatabasesAsync(scopes.Select(scope=>scope.Database),ct)).ToHashSet(StringComparer.Ordinal);
+                scopes=scopes.Where(scope=>verified.Contains(scope.Database)).ToList();
+            }
+            string description=DescribeBundleSelection(dialog.Mode,scopes,dialog.Options)+"\n\n"+dialog.SelectionDescription;
+            await RunBundleAsync(root,scopes,dialog.Options,ct,plan=>
+            {
             ct.ThrowIfCancellationRequested();
             string targets=description+"\n\n실제 대상 폴더 "+plan.FolderCount.ToString("N0")+"개\n"+string.Join("\n",plan.Folders);
             if(plan.UnknownIdentityPanels>0)targets+=$"\n식별 정보가 일부 미기록인 검사 {plan.UnknownIdentityPanels:N0}개도 위 검사 수에 포함되어 있으며 별도로 보존합니다.";
             if(plan.FolderCount>plan.Folders.Count)targets+=$"\n… 나머지 {plan.FolderCount-plan.Folders.Count:N0}개는 상세 기록의 패널목록에서 확인할 수 있습니다.";
             var confirmation=new BundleConfirmWindow(plan.PlannedPanels,dialog.Mode,targets,root,dialog.Options){Owner=this};
             bool accepted=ShowModal(()=>confirmation.ShowDialog())==true;ct.ThrowIfCancellationRequested();return Task.FromResult(accepted);
-        }),true);
+            });
+        },true);
     }
     private List<BundleScope> CreateBundleScopes(BundleMode mode,string? panelId)
     {

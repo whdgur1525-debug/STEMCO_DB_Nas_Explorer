@@ -64,7 +64,10 @@ public sealed record SearchFilter
     }
 }
 
-public sealed record DatabaseInfo(string Name, string State, bool IsInspection, string? Error = null);
+public sealed record DatabaseInfo(string Name, string State, bool IsInspection, string? Error = null)
+{
+    public bool RequiresInspectionCheck { get; init; }
+}
 public sealed record RowKey(string Server, string Database, string Table, string Id);
 public sealed class ResultRow
 {

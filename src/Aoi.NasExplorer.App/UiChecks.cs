@@ -41,12 +41,12 @@ public partial class MainWindow
         Directory.CreateDirectory(folder);var checks=new List<object>();int failed=0;
         async Task Check(string name,Func<Task> test){try{await test();checks.Add(new{name,status="passed"});}catch(Exception ex){failed++;checks.Add(new{name,status="failed",error=ex.Message});}}
         await Check("actual LOT metadata displayed",async()=>{await BeginQueryAsync(new(),BrowseLevel.Lots,new[]{database},default);if(_rows.Count==0)throw new InvalidDataException("No LOT rows");});
-        await Check("actual all-scope count distinguishes visible rows and total defects",async()=>{await _summaryTask;if(!SummaryLabel.Text.Contains("257,902")||_summaryRows.Sum(x=>x.Long("defect_count")??0)!=257902)throw new InvalidDataException(SummaryLabel.Text);});
+        await Check("actual all-scope count distinguishes visible rows and total defects",async()=>{StartSummary();await _summaryTask;if(!SummaryLabel.Text.Contains("257,902")||_summaryRows.Sum(x=>x.Long("defect_count")??0)!=257902)throw new InvalidDataException(SummaryLabel.Text);});
         await Check("actual LOT search and direct defects agree with recovered counts",async()=>
         {
-            SearchTargetBox.SelectedIndex=0;SearchText.Text="agsd";await SearchGlobalAsync();await _summaryTask;
+            SearchTargetBox.SelectedIndex=0;SearchText.Text="agsd";await SearchGlobalAsync();StartSummary();await _summaryTask;
             if(_rows.Count!=1||!SummaryLabel.Text.Contains("82,836"))throw new InvalidDataException(SummaryLabel.Text);
-            Results.SelectedIndex=0;await OpenSelectedAsync(BrowseLevel.Defects);await _summaryTask;
+            Results.SelectedIndex=0;await OpenSelectedAsync(BrowseLevel.Defects);StartSummary();await _summaryTask;
             if(_level!=BrowseLevel.Defects||_rows.Count!=250||!SummaryLabel.Text.Contains("82,836"))throw new InvalidDataException(SummaryLabel.Text);
         });
         await Check("actual inspection history displayed",async()=>{await BeginQueryAsync(new(),BrowseLevel.Inspections,new[]{database},default);if(_rows.Count==0)throw new InvalidDataException("No inspections");});
@@ -56,7 +56,7 @@ public partial class MainWindow
             while(!_ertAvailability.ContainsKey(Selected()!.Text("model_name")+"_Layer"+Selected()!.Text("layer_name"))){if((DateTime.UtcNow-start).TotalSeconds>10)throw new TimeoutException("Model availability timeout");await Task.Delay(10);}
             if(ErtButton.IsEnabled||!Convert.ToString(ErtButton.ToolTip)!.Contains("모델 자료"))throw new InvalidDataException("ERT eligibility was not explained");
         });
-        await Check("actual defect metadata and stored fields displayed",async()=>{await BeginQueryAsync(new(){Images=ImageFilter.Present},BrowseLevel.Defects,new[]{database},default);await _summaryTask;if(_rows.Count==0||!SummaryLabel.Text.Contains("257,902"))throw new InvalidDataException("Defect-filtered count failed: "+SummaryLabel.Text);Results.SelectedIndex=0;var start=DateTime.UtcNow;while(Details.Items.Count==0){if((DateTime.UtcNow-start).TotalSeconds>10)throw new TimeoutException("Detail load timeout");await Task.Delay(10);}});
+        await Check("actual defect metadata and stored fields displayed",async()=>{await BeginQueryAsync(new(){Images=ImageFilter.Present},BrowseLevel.Defects,new[]{database},default);StartSummary();await _summaryTask;if(_rows.Count==0||!SummaryLabel.Text.Contains("257,902"))throw new InvalidDataException("Defect-filtered count failed: "+SummaryLabel.Text);Results.SelectedIndex=0;var start=DateTime.UtcNow;while(Details.Items.Count==0){if((DateTime.UtcNow-start).TotalSeconds>10)throw new TimeoutException("Detail load timeout");await Task.Delay(10);}});
         await Check("actual image pixels decoded without HALCON",async()=>{var start=DateTime.UtcNow;while(DefectImage.Source is null){if((DateTime.UtcNow-start).TotalSeconds>10)throw new InvalidDataException(ImagePlaceholder.Text);await Task.Delay(10);}});
         await Check("actual selected-image workflow preserves bytes and reports snapshot success",async()=>
         {
@@ -177,6 +177,8 @@ public partial class MainWindow
         {
             await ShowDemoAsync();Results.SelectedIndex=_rows.FindIndex(x=>x.Text("lot_id_name")=="agsd");await OpenSelectedAsync(BrowseLevel.Defects);
             Assert(_level==BrowseLevel.Defects&&_filter.LotId=="1"&&_filter.InspectionId=="");
+            Assert(_displayedSummary is null);
+            StartSummary();await _summaryTask;
             Assert(SummaryLabel.Text.Contains("72")&&_summaryRows.Count==6);
         });
         await Check("export eligibility explains folder and selection requirements",async()=>

@@ -109,6 +109,48 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
         return fields;
     }
     public void ClearSchemaCache() => _schemas.Clear();
+    private static bool IsInspectionSchema(IReadOnlyDictionary<string,string> schema)=>
+        new[]{"lot_id.lot_id","layer.layer","inspection.inspection","defects.defects"}.All(schema.ContainsKey);
+
+    private static async Task<bool> CanBrowseInspectionSchemaAsync(NpgsqlConnection connection,
+        IReadOnlyDictionary<string,string> schema,CancellationToken ct)
+    {
+        if(IsInspectionSchema(schema))return true;
+        // information_schema hides columns from users without privileges. A real
+        // inspection DB with hidden keys must remain in the failed/unknown set.
+        await using var command=new NpgsqlCommand(
+            "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "+
+            "WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f') "+
+            "AND c.relname IN ('lot_id','layer','inspection','defects')",connection);
+        if(Convert.ToInt64(await command.ExecuteScalarAsync(ct))==4)
+            throw new InvalidDataException("검사 테이블은 있지만 필수 키를 조회할 수 없습니다. DB 조회 권한과 스키마를 확인하세요.");
+        return false;
+    }
+
+    public async Task<IReadOnlyList<DatabaseInfo>> ReadDatabaseCatalogAsync(ConnectionProfile profile,CancellationToken ct)
+    {
+        await using var connection=await OpenAsync(profile,profile.ManagementDatabase,ct);
+        await using var command=new NpgsqlCommand(
+            "SELECT datname FROM pg_database WHERE NOT datistemplate AND datallowconn ORDER BY datname COLLATE \"C\" DESC",connection);
+        var databases=new List<DatabaseInfo>();
+        await using var reader=await command.ExecuteReaderAsync(ct);
+        while(await reader.ReadAsync(ct))
+            databases.Add(new DatabaseInfo(reader.GetString(0),"검사 DB 여부는 조회 시 확인",false){RequiresInspectionCheck=true});
+        return databases;
+    }
+
+    public async Task<bool> IsInspectionDatabaseAsync(ConnectionProfile profile,string database,CancellationToken ct)
+    {
+        string key=$"{profile.Identity}/{profile.Username}/{database}";
+        if(_schemas.TryGetValue(key,out var cached)&&IsInspectionSchema(cached))return true;
+        await using var connection=await OpenAsync(profile,database,ct);
+        return await CanBrowseInspectionSchemaAsync(connection,await SchemaAsync(profile,connection,ct),ct);
+    }
+
+    public Task<QueryPage?> BrowseInspectionPageAsync(ConnectionProfile profile,string database,BrowseLevel level,
+        SearchFilter filter,int pageSize,string? cursor,CancellationToken ct)=>
+        QueryPageAsync(profile,database,level,filter,pageSize,cursor,true,ct);
+
     public Task<IReadOnlyList<DatabaseInfo>> DiscoverAsync(ConnectionProfile p,CancellationToken ct)=>DiscoverAsync(p,ct,null);
 
     public async Task<IReadOnlyList<DatabaseInfo>> DiscoverAsync(ConnectionProfile p,CancellationToken ct,IProgress<string>? progress)
@@ -147,7 +189,7 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
             {
                 await using var db=await OpenAsync(p,name,token,false);
                 var schema=await SchemaAsync(p,db,token);
-                bool inspection = new[] {"lot_id.lot_id", "layer.layer", "inspection.inspection", "defects.defects"}.All(schema.ContainsKey);
+                bool inspection=IsInspectionSchema(schema);
                 if (inspection || name.StartsWith("aoi_", StringComparison.Ordinal) || name == p.ManagementDatabase)
                     result[index]=new(name,states.GetValueOrDefault(name,"미등록"),inspection,statusError);
                 progress?.Report($"DB 스키마 확인 · {name} · {(inspection?"검사 DB":"검사 DB 아님")} · {elapsed.Elapsed.TotalSeconds:F2}초");
@@ -178,7 +220,11 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
     private static void Require(IReadOnlyDictionary<string,string> schema, string field)
     { if (!schema.ContainsKey(field)) throw new NotSupportedException($"필수 항목 {field}가 없는 DB입니다."); }
     public async Task<QueryPage> QueryAsync(ConnectionProfile p, string database, BrowseLevel level,
-        SearchFilter f, int pageSize, string? cursor, CancellationToken ct)
+        SearchFilter f, int pageSize, string? cursor, CancellationToken ct)=>
+        (await QueryPageAsync(p,database,level,f,pageSize,cursor,false,ct))!;
+
+    private async Task<QueryPage?> QueryPageAsync(ConnectionProfile p,string database,BrowseLevel level,
+        SearchFilter f,int pageSize,string? cursor,bool browse,CancellationToken ct)
     {
         f.Validate();
         if (pageSize is < 1 or > 1000) throw new ArgumentOutOfRangeException(nameof(pageSize));
@@ -187,7 +233,8 @@ public sealed class ExplorerRepository : IExplorerRepository,IDisposable
         try
         {
         var s = await SchemaAsync(p, c, ct);
-        await using var cmd=BuildQuery(c,s,level,f,pageSize,cursor,true);
+        if(browse&&!await CanBrowseInspectionSchemaAsync(c,s,ct))return null;
+        await using var cmd=BuildQuery(c,s,level,f,pageSize,cursor,!browse);
         var rows = new List<ResultRow>();
         await using(var r=await cmd.ExecuteReaderAsync(ct)) while(await r.ReadAsync(ct)) rows.Add(ReadRow(r,database));
         bool more = rows.Count > pageSize;

@@ -26,6 +26,7 @@ public partial class MainWindow : Window
     private List<DatabaseInfo> _databases=[];
     private readonly List<ResultRow> _rows=[];
     private readonly HashSet<string> _failedDatabases=new(StringComparer.Ordinal);
+    private readonly HashSet<string> _nonInspectionDatabases=new(StringComparer.Ordinal);
     private readonly Dictionary<string,BitmapSource> _imageCache=new(StringComparer.Ordinal);
     private readonly Queue<string> _imageOrder=new();
     private long _cacheBytes;
@@ -129,17 +130,19 @@ public partial class MainWindow : Window
             _repository=repo;_profile=next;_demo=false;_databases=found.ToList();ResetExperience();ClearImages();
             _rememberPassword=remember;
             _passwordWarning=null;
-            var initial=new SearchFilter{Target=SelectedTarget()};_checkedRecords.Clear();_rows.Clear();_queryDatabases.Clear();_filter=initial;_clearFolderContext=true;
-            _level=initial.Target==SearchTarget.Model?BrowseLevel.Models:BrowseLevel.Lots;LevelBox.SelectedIndex=(int)_level;ShowFilterInputs(initial);BindRows();
+            var initial=new SearchFilter{Target=SelectedTarget()};
+            PrepareList(initial,initial.Target==SearchTarget.Model?BrowseLevel.Models:BrowseLevel.Lots,[],null,false);
+            _clearFolderContext=true;
+            BindRows();
             DefectImage.Source=null;Details.ItemsSource=null;DetailSource.Text="새 연결에서 조회할 기록을 선택하세요.";
             ConnectionLabel.Text=$"{next.Name} · {next.Host}:{next.Port} · 읽기 전용";
             if(!_smoke)try{ProfileStore.Save(next,remember);}catch(Exception ex) when(ex is IOException or UnauthorizedAccessException or CryptographicException){Log("연결 설정 저장 실패 · 이번 연결은 유지합니다: "+ExplorerRepository.SafeError(ex));}
             ConfigureNavigation();
-            Log($"연결 완료 · 검사 DB {found.Count(x=>x.IsInspection)}개 / 확인 대상 {found.Count}개");
-            foreach(var db in found.Where(x=>x.Error is not null))Log($"{db.Name}: {db.Error}");
-            if(next.Host is "127.0.0.1" or "localhost" or "::1")
-                if(ScopeBox.ItemsSource is IEnumerable<Scope> scopes&&scopes.FirstOrDefault(x=>x.Database==next.ManagementDatabase) is Scope localScope)ScopeBox.SelectedItem=localScope;
-            await BeginQueryAsync(initial,_level,SelectedDatabases(),ct,false,allDatabases:ScopeBox.SelectedItem is Scope{Database:null});
+            SelectInitialDatabase();
+            CountLabel.Text="조회 대기";
+            SummaryLabel.Text="전체 건수는 요청 시 조회합니다";
+            Notice.Text="DB를 선택하고 검색하세요. 전체 DB 검색은 범위에서 선택할 수 있습니다.";
+            Log($"연결 완료 · DB 이름 {found.Count:N0}개 · 검사 DB 여부는 검색할 때 확인");
         });
     }
     public async Task ShowDemoAsync(bool defects=false)
@@ -156,14 +159,27 @@ public partial class MainWindow : Window
     private async void Demo_Click(object sender,RoutedEventArgs e)=>await ShowDemoAsync();
     private void ConfigureNavigation()
     {
-        Navigation.Items.Clear();var scopes=new List<Scope>{new("전체 검사 DB",null)};
+        Navigation.Items.Clear();var scopes=new List<Scope>{new("전체 DB 검색",null)};
         foreach(var db in _databases)
         {
-            var item=new TreeViewItem{Header="DB: "+db.Name,ToolTip=db.Error??db.State,IsEnabled=db.IsInspection};
-            if(db.IsInspection){item.Tag=new Nav(db.Name,BrowseLevel.Models,new(),db.Name);item.Items.Add(new TreeViewItem{Header="불러오는 중…"});scopes.Add(new(db.Name,db.Name));}
+            bool candidate=db.IsInspection||db.RequiresInspectionCheck;
+            var item=new TreeViewItem{Header="DB: "+db.Name,ToolTip=db.Error??db.State,IsEnabled=candidate};
+            if(candidate){item.Tag=new Nav(db.Name,BrowseLevel.Models,new(),db.Name);item.Items.Add(new TreeViewItem{Header="열면 검사 DB 여부를 확인합니다"});scopes.Add(new(db.Name,db.Name));}
             Navigation.Items.Add(item);
         }
         ScopeBox.ItemsSource=scopes;ScopeBox.SelectedIndex=0;
+    }
+    private void SelectInitialDatabase()
+    {
+        var scopes=(IEnumerable<Scope>)ScopeBox.ItemsSource;
+        string management=_profile.ManagementDatabase;
+        var initial=scopes.FirstOrDefault(scope=>scope.Database==management&&management is not ("postgres" or "aoi_config" or "aoi_model"))
+            ??scopes.FirstOrDefault(scope=>scope.Database is { } name&&IsDatedDatabaseName(name))
+            ??scopes.FirstOrDefault(scope=>scope.Database is { } name&&name.StartsWith("aoi_",StringComparison.Ordinal)
+                &&name is not ("aoi_config" or "aoi_model"))
+            ??scopes.FirstOrDefault(scope=>scope.Database is not (null or "postgres" or "aoi_config" or "aoi_model"))
+            ??scopes.FirstOrDefault(scope=>scope.Database is not null);
+        ScopeBox.SelectedItem=initial;
     }
     private async void Navigation_Expanded(object sender,RoutedEventArgs e)
     {
@@ -174,7 +190,14 @@ public partial class MainWindow : Window
     }
     private async Task PopulateNodeAsync(TreeViewItem item,Nav node,string? cursor,CancellationToken ct)
     {
-        var page=await _repository.QueryAsync(_profile,node.Database,node.Level,node.Filter,100,cursor,ct);
+        using var limit=CancellationTokenSource.CreateLinkedTokenSource(ct);
+        limit.CancelAfter(TimeSpan.FromSeconds(5));
+        var page=await BrowsePageAsync(node.Database,node.Level,node.Filter,100,cursor,limit.Token);
+        if(page is null)
+        {
+            item.Items.Add(new TreeViewItem{Header="검사 DB가 아닙니다"});
+            return;
+        }
         foreach(var row in page.Rows)
         {
             var next=Child(row,node.Level,node.Filter);
@@ -226,7 +249,20 @@ public partial class MainWindow : Window
         ImageFilterBox.SelectedIndex=(int)f.Images;LatestCheck.IsChecked=f.LatestOnly;
         if(ScopeBox.ItemsSource is IEnumerable<Scope> scopes)ScopeBox.SelectedItem=_allDatabases?scopes.FirstOrDefault():_queryDatabases.Count==1?scopes.FirstOrDefault(x=>x.Database==_queryDatabases[0])??scopes.First():scopes.FirstOrDefault();
     }
-    private string[] SelectedDatabases()=>ScopeBox.SelectedItem is Scope {Database:not null} scope?new[]{scope.Database}:_databases.Where(x=>x.IsInspection).Select(x=>x.Name).ToArray();
+    private string[] SelectedDatabases()=>ScopeBox.SelectedItem switch
+    {
+        Scope {Database:not null} scope=>[scope.Database],
+        Scope=>CatalogSearchOrder(),
+        _=>[]
+    };
+    private static bool IsDatedDatabaseName(string name)=>name.Length>=12&&name.StartsWith("aoi_",StringComparison.Ordinal)
+        &&DateOnly.TryParseExact(name.AsSpan(4,8),"yyyyMMdd",System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None,out _);
+
+    private string[] CatalogSearchOrder()=>_databases.Where(db=>db.IsInspection||db.RequiresInspectionCheck)
+        .OrderByDescending(db=>IsDatedDatabaseName(db.Name))
+        .ThenByDescending(db=>db.IsInspection||db.Name.StartsWith("aoi_",StringComparison.Ordinal)&&db.Name is not ("aoi_config" or "aoi_model"))
+        .Select(db=>db.Name).ToArray();
     private async void Search_Click(object sender,RoutedEventArgs e)=>await SearchGlobalAsync();
     private async void SearchText_KeyDown(object sender,KeyEventArgs e){if(e.Key==Key.Enter){e.Handled=true;await SearchGlobalAsync();}}
     private async Task BeginQueryAsync(SearchFilter filter,BrowseLevel level,IEnumerable<string> databases,CancellationToken ct,bool history=true,Location[]? trail=null,bool allDatabases=false)
@@ -245,7 +281,6 @@ public partial class MainWindow : Window
         ct.ThrowIfCancellationRequested();
         if(clearedChecks>0&&!_restoringChecks)Notice.Text+=$" · 검색·경로 변경으로 이전 체크 {clearedChecks:N0}개 해제";
         _lastRefresh=DateTimeOffset.Now;ScheduleAutoRefresh();UpdateRefreshLabel();UpdateActions();
-        StartSummary();
     }
     private void PrepareList(SearchFilter filter,BrowseLevel level,IEnumerable<string> databases,Location[]? trail,bool allDatabases)
     {
@@ -255,7 +290,7 @@ public partial class MainWindow : Window
         _lastRefresh=null;
         if(allDatabases)filter=filter with{LotId="",LayerId="",InspectionId=""};
         UpdatePath(filter,level,databases.ToArray(),trail,allDatabases);
-        _detailCts?.Cancel();_filter=filter;_level=level;_allDatabases=allDatabases;LevelBox.SelectedIndex=(int)level;_queryDatabases=databases.ToList();_databaseIndex=0;_cursor=null;_hasMore=_queryDatabases.Count>0;_rows.Clear();_failedDatabases.Clear();ThumbnailPanel.Children.Clear();
+        _detailCts?.Cancel();_filter=filter;_level=level;_allDatabases=allDatabases;LevelBox.SelectedIndex=(int)level;_queryDatabases=databases.ToList();_databaseIndex=0;_cursor=null;_hasMore=_queryDatabases.Count>0;_rows.Clear();_failedDatabases.Clear();_nonInspectionDatabases.Clear();ThumbnailPanel.Children.Clear();
         _clearFolderContext=false;ShowFilterInputs(filter);
         DefectImage.Source=null;_image=null;ImagePlaceholder.Visibility=Visibility.Visible;ImagePlaceholder.Text="불량을 선택하면 이미지를 표시합니다";ImageInfo.Text="휠로 확대 · 스크롤로 이동 · 방향키로 목록 이동";Details.ItemsSource=null;
         Breadcrumb.Text=$"DB: {(_queryDatabases.Count==1?_queryDatabases[0]:"전체 검사 DB")} · 현재 목록: {LevelNames[(int)level]}";
@@ -263,31 +298,113 @@ public partial class MainWindow : Window
         ActiveFilterLabel.Text=DescribeFilters();
         Notice.Text=_demo?"예제 데이터입니다. 실제 검사 결과가 아닙니다.":"DB별 순차 조회 · 열 정렬은 현재 표시된 목록에 적용 · NULL / 없는 컬럼은 상세에서 구분";
     }
+    private Task<QueryPage?> BrowsePageAsync(string database,BrowseLevel level,SearchFilter filter,int size,string? cursor,CancellationToken ct)
+    {
+        if(_repository is ExplorerRepository explorer)
+            return explorer.BrowseInspectionPageAsync(_profile,database,level,filter,size,cursor,ct);
+        return ReadRepositoryAsync();
+        async Task<QueryPage?> ReadRepositoryAsync()=>await _repository.QueryAsync(_profile,database,level,filter,size,cursor,ct);
+    }
+
     private async Task LoadPageAsync(CancellationToken ct)
     {
         var selection=Selected()?.Key(_profile.Identity,_level);
-        if(_queryDatabases.Count==0){Notice.Text="현재 범위에 조회할 수 있는 검사 DB가 없습니다. 탐색 옆 ↻로 DB 목록을 다시 확인하세요.";CountLabel.Text="현재 목록 0개";_hasMore=false;return;}
-        while(_databaseIndex<_queryDatabases.Count)
+        bool multi=_queryDatabases.Count>1;
+        var batch=Stopwatch.StartNew();
+        var batchLimit=TimeSpan.FromSeconds(5);
+        var databaseLimit=TimeSpan.FromSeconds(multi?2.5:15);
+        int attempts=0;
+        try
         {
-            string db=_queryDatabases[_databaseIndex];
-            var elapsed=Stopwatch.StartNew();
-            try
+            while(_databaseIndex<_queryDatabases.Count)
             {
-                var page=await _repository.QueryAsync(_profile,db,_level,_filter,250,_cursor,ct);ct.ThrowIfCancellationRequested();
-                if(_rows.Count>=5000){_rows.Clear();Log("표시 목록 5,000개를 넘겨 다음 구간으로 이동했습니다. 전체 결과는 CSV로 추출할 수 있습니다.");}
-                ApplyLotCounts(page.Rows);
-                _rows.AddRange(page.Rows);_cursor=page.Cursor;
+                ct.ThrowIfCancellationRequested();
+                var remaining=batchLimit-batch.Elapsed;
+                if(multi&&(remaining<TimeSpan.FromMilliseconds(250)||attempts>=12))break;
+
+                string db=_queryDatabases[_databaseIndex];
+                Status.Text=$"조회 중 · {db} · DB {_databaseIndex+1:N0}/{_queryDatabases.Count:N0}";
+                var elapsed=Stopwatch.StartNew();
+                bool curtailed=multi&&remaining<databaseLimit;
+                using var deadline=CancellationTokenSource.CreateLinkedTokenSource(ct);
+                deadline.CancelAfter(curtailed?remaining:databaseLimit);
+                attempts++;
+                QueryPage? page;
+                try
+                {
+                    page=await BrowsePageAsync(db,_level,_filter,250,_cursor,deadline.Token);
+                    ct.ThrowIfCancellationRequested();
+                }
+                catch(Exception ex) when(ex is not OperationCanceledException||deadline.IsCancellationRequested&&!ct.IsCancellationRequested)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if(deadline.IsCancellationRequested&&curtailed)
+                    {
+                        Log($"목록 조회 구간 종료 · {db}의 같은 위치에서 계속 조회");
+                        break;
+                    }
+                    _failedDatabases.Add(db);
+                    string reason=deadline.IsCancellationRequested?"목록 응답 시간 초과":ExplorerRepository.SafeError(ex);
+                    Log($"{db} 목록 조회 실패 · {elapsed.Elapsed.TotalSeconds:F2}초: {reason}");
+                    AdvanceDatabase();
+                    continue;
+                }
+                _lastRefresh=DateTimeOffset.Now;
+                if(page is null)
+                {
+                    _nonInspectionDatabases.Add(db);
+                    Log($"목록 조회 제외 · {db} · 검사 테이블이 없는 DB · {elapsed.Elapsed.TotalSeconds:F2}초");
+                    AdvanceDatabase();
+                    continue;
+                }
                 Log($"목록 조회 · {db} · {LevelNames[(int)_level]} · {page.Rows.Count:N0}행 · {elapsed.Elapsed.TotalSeconds:F2}초");
-                if(!page.HasMore){_databaseIndex++;_cursor=null;}
-                _hasMore=_databaseIndex<_queryDatabases.Count;BindRows();
-                if(selection is not null)SelectResultAtSourceIndex(_rows.FindIndex(row=>row.Key(_profile.Identity,_level)==selection));
+                if(page.Rows.Count>0)
+                {
+                    if(_rows.Count>=5000)
+                    {
+                        _rows.Clear();
+                        Log("표시 목록 5,000개를 넘겨 다음 구간으로 이동했습니다. 전체 결과는 CSV로 추출할 수 있습니다.");
+                    }
+                    ApplyLotCounts(page.Rows);
+                    _rows.AddRange(page.Rows);
+                    BindRows();
+                    if(selection is not null)RestoreSelection(selection);
+                }
+                if(!page.HasMore)AdvanceDatabase();
+                else _cursor=page.Cursor;
                 if(page.Rows.Count>0)break;
             }
-            catch(Exception ex) when(ex is not OperationCanceledException)
-            {_failedDatabases.Add(db);Log($"{db} 목록 조회 실패 · {elapsed.Elapsed.TotalSeconds:F2}초: {ExplorerRepository.SafeError(ex)}");Notice.Text=$"일부 DB 조회 실패: {string.Join(", ",_failedDatabases)} · 작업 기록 확인";_databaseIndex++;_cursor=null;}
         }
-        _hasMore=_databaseIndex<_queryDatabases.Count;MoreButton.IsEnabled=_hasMore&&_queryCts is null;
-        CountLabel.Text=$"현재 목록 {_rows.Count:N0}개 · {(_hasMore?"추가 결과 있음":"조회 범위 끝")}"+(_failedDatabases.Count>0?$" · 실패 DB {_failedDatabases.Count}개":"");
+        finally
+        {
+            _hasMore=_databaseIndex<_queryDatabases.Count;
+            UpdateListProgress();
+        }
+    }
+
+    private void AdvanceDatabase()
+    {
+        _databaseIndex++;
+        _cursor=null;
+    }
+
+    private void UpdateListProgress()
+    {
+        string progress=_queryDatabases.Count==0?"조회할 DB 없음"
+            :_hasMore?$"DB {_databaseIndex:N0}/{_queryDatabases.Count:N0} 완료 · 계속 조회 가능"
+            :_failedDatabases.Count>0?"조회 일부 미완료"
+            :_nonInspectionDatabases.Count==_queryDatabases.Count?"검사 DB 없음"
+            :"조회 범위 끝";
+        string size=_rows.Count>0?$"현재 표시 {_rows.Count:N0}개"
+            :_queryDatabases.Count>0&&!_hasMore&&_failedDatabases.Count==0&&_nonInspectionDatabases.Count<_queryDatabases.Count
+                ?"검색 결과 0건":"현재 표시할 결과 없음";
+        CountLabel.Text=$"{size} · {progress}";
+        if(_nonInspectionDatabases.Count>0)CountLabel.Text+=$" · 검사 DB 아님 {_nonInspectionDatabases.Count:N0}개";
+        if(_failedDatabases.Count>0)
+        {
+            CountLabel.Text+=$" · 실패 DB {_failedDatabases.Count:N0}개";
+            Notice.Text="미확인 DB: "+string.Join(", ",_failedDatabases)+" · 해당 DB를 선택해 다시 검색하거나 F5로 재조회하세요.";
+        }
     }
     private void BindRows(IReadOnlyList<System.ComponentModel.SortDescription>? savedSort=null)
     {
@@ -406,10 +523,29 @@ public partial class MainWindow : Window
     private async IAsyncEnumerable<ResultRow> AllRows(SearchFilter filter,BrowseLevel level,string[] databases,[EnumeratorCancellation]CancellationToken ct,bool images=false)
     {
         var repo=_repository;var profile=_profile;
-        foreach(string db in databases)
+        foreach(string db in await ResolveInspectionDatabasesAsync(databases,ct))
         {
             await foreach(var row in repo.StreamAsync(profile,db,level,filter,images,time=>RecordSnapshot(db,time),ct))yield return row;
         }
+    }
+    private async Task<string[]> ResolveInspectionDatabasesAsync(IEnumerable<string> databases,CancellationToken ct)
+    {
+        if(_repository is not ExplorerRepository explorer)return databases.ToArray();
+        var verified=new List<string>();
+        foreach(string db in databases)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                if(await explorer.IsInspectionDatabaseAsync(_profile,db,ct))verified.Add(db);
+            }
+            catch(Exception ex) when(ex is not OperationCanceledException)
+            {
+                ct.ThrowIfCancellationRequested();
+                throw new InvalidOperationException($"전체 범위의 DB {db} 확인 실패 · {ExplorerRepository.SafeError(ex)}",ex);
+            }
+        }
+        return verified.ToArray();
     }
     private async void ExportCsv_Click(object sender,RoutedEventArgs e)
     {

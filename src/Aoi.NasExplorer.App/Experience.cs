@@ -51,7 +51,7 @@ public partial class MainWindow
         }
         SizeChanged+=(_,_)=>FitFilters();FitFilters();
         DetailSearchExpander.Expanded+=(_,_)=>{if(ActualHeight<800)SummaryExpander.IsExpanded=false;};
-        SummaryExpander.Expanded+=(_,_)=>{if(ActualHeight<800)DetailSearchExpander.IsExpanded=false;StartSummaryIfNeeded();};
+        SummaryExpander.Expanded+=(_,_)=>{if(ActualHeight<800)DetailSearchExpander.IsExpanded=false;};
         _refreshTimer.Interval=TimeSpan.FromSeconds(1);
         _refreshTimer.Tick+=async(_,_)=>await AutoRefreshTickAsync();
         _refreshTimer.Start();
@@ -152,8 +152,18 @@ public partial class MainWindow
                 _databases=(await DiscoverDatabasesAsync(_repository,_profile,ct)).ToList();
                 _recentLists.Clear();
                 _history.Clear();_forward.Clear();
+                var picked=ScopeBox.SelectedItem as Scope;
                 ConfigureNavigation();
-                var found=_databases.Where(x=>x.IsInspection).Select(x=>x.Name).ToArray();
+                if(databases.Length==0)
+                {
+                    var scopes=(IEnumerable<Scope>)ScopeBox.ItemsSource;
+                    var previous=picked is null?null:scopes.FirstOrDefault(scope=>scope.Database==picked.Database);
+                    if(previous is null)SelectInitialDatabase();
+                    else ScopeBox.SelectedItem=previous;
+                    Notice.Text="서버 DB 이름을 갱신했습니다. 범위를 선택하고 검색하세요.";
+                    return;
+                }
+                var found=CatalogSearchOrder();
                 databases=all?found:databases.Where(found.Contains).ToArray();
                 trail=trail.Select(step=>step with{Databases=step.AllDatabases?found:step.Databases.Where(found.Contains).ToArray()}).ToArray();
             }
@@ -207,9 +217,9 @@ public partial class MainWindow
         {
             Status.Text="서버 DB 목록 탐색 중 · 취소 가능";
             var databases=repository is ExplorerRepository explorer
-                ?await explorer.DiscoverAsync(profile,ct,new Progress<string>(message=>{if(!ct.IsCancellationRequested)Log(message);}))
+                ?await explorer.ReadDatabaseCatalogAsync(profile,ct)
                 :await repository.DiscoverAsync(profile,ct);
-            Log($"DB 탐색 완료 · 확인 {databases.Count:N0}개 · 검사 DB {databases.Count(db=>db.IsInspection):N0}개 · {elapsed.Elapsed.TotalSeconds:F2}초");
+            Log($"DB 이름 확인 완료 · {databases.Count:N0}개 · {elapsed.Elapsed.TotalSeconds:F2}초");
             return databases;
         }
         catch(Exception ex)
@@ -229,7 +239,7 @@ public partial class MainWindow
         _summaryRows.Clear();
         _lotSummaryRows.Clear();
         PanelSummary.ItemsSource=LotSummary.ItemsSource=null;
-        SummaryLabel.Text="검색 전체 건수 · 조회 대기";
+        SummaryLabel.Text="전체 건수는 요청 시 조회합니다";
     }
 
     private void StopSummary()
@@ -299,6 +309,7 @@ public partial class MainWindow
         var panelRows=new List<ResultRow>();
         var lotRows=new List<ResultRow>();
         long lots=0,inspections=0,defects=0,panels=0;
+        int confirmed=0;
         var failures=new List<string>();
         foreach(var db in databases)
         {
@@ -306,8 +317,11 @@ public partial class MainWindow
             var elapsed=Stopwatch.StartNew();
             try
             {
+                if(repository is ExplorerRepository explorer&&!await explorer.IsInspectionDatabaseAsync(profile,db,ct))
+                    continue;
                 var summary=await repository.SummaryAsync(profile,db,filter,ct);
                 ct.ThrowIfCancellationRequested();
+                confirmed++;
                 lots+=summary.Lots;
                 inspections+=summary.Inspections;
                 defects+=summary.Defects;
@@ -323,9 +337,9 @@ public partial class MainWindow
                 Log($"건수 집계 실패 · {db} · {elapsed.Elapsed.TotalSeconds:F2}초: {ExplorerRepository.SafeError(ex)}");
             }
         }
-        string label=failures.Count==databases.Length?"전체 건수 집계 실패 · 작업 기록 확인"
+        string label=confirmed==0?(failures.Count>0?"전체 건수 집계 실패 · 작업 기록 확인":"집계할 검사 DB 없음")
             :$"검색 일치 불량 {defects:N0}건 · LOT {lots:N0}개 · 검사 기록 {inspections:N0}개 · 패널 그룹 {panels:N0}개";
-        if(failures.Count>0&&failures.Count<databases.Length)
+        if(failures.Count>0&&confirmed>0)
             label+=$" · 일부 집계 실패 ({failures.Count} DB, 성공한 DB만 합산)";
         if(panelRows.Count<panels)label+=" · 집계 표는 DB별 최대 1,000그룹";
         return new(panelRows.ToArray(),lotRows.ToArray(),label,failures.Count>0);

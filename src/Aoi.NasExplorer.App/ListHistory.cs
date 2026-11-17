@@ -7,7 +7,7 @@ namespace Aoi.NasExplorer.App;
 public partial class MainWindow
 {
     private sealed record ListSnapshot(Location Location,ResultRow[] Rows,KeyValuePair<string,ResultRow>[] Checks,
-        string[] FailedDatabases,int DatabaseIndex,string? Cursor,bool HasMore,SortDescription[] Sort,
+        string[] FailedDatabases,string[] NonInspectionDatabases,int DatabaseIndex,string? Cursor,bool HasMore,SortDescription[] Sort,
         RowKey? SelectedKey,DateTimeOffset ReadAt,string CountText,SummarySnapshot? Summary);
 
     private readonly LinkedList<ListSnapshot> _recentLists=new();
@@ -28,7 +28,7 @@ public partial class MainWindow
         var summary=_displayedSummary;
         if(summary is not null&&summary.Panels.Length+summary.Lots.Length>CachedSummaryRowLimit)summary=null;
         _recentLists.AddFirst(new ListSnapshot(location,_rows.ToArray(),_checkedRecords.ToArray(),_failedDatabases.ToArray(),
-            _databaseIndex,_cursor,_hasMore,sort,Selected()?.Key(_profile.Identity,_level),readAt,CountLabel.Text,summary));
+            _nonInspectionDatabases.ToArray(),_databaseIndex,_cursor,_hasMore,sort,Selected()?.Key(_profile.Identity,_level),readAt,CountLabel.Text,summary));
         if(_recentLists.Count>ListHistoryLimit)_recentLists.RemoveLast();
     }
 
@@ -48,6 +48,7 @@ public partial class MainWindow
         _rows.AddRange(list.Rows);
         foreach(var entry in list.Checks)_checkedRecords[entry.Key]=entry.Value;
         _failedDatabases.UnionWith(list.FailedDatabases);
+        _nonInspectionDatabases.UnionWith(list.NonInspectionDatabases);
         (_databaseIndex,_cursor,_hasMore)=(list.DatabaseIndex,list.Cursor,list.HasMore);
         _lastRefresh=list.ReadAt;
         if(list.Summary is not null)DisplaySummary(list.Summary);
@@ -56,7 +57,7 @@ public partial class MainWindow
         RestoreSelection(state.SelectedKey??list.SelectedKey);
         CountLabel.Text=list.CountText;
         Notice.Text=$"이전 목록 · {list.ReadAt:HH:mm:ss} 조회분 · 최신 결과는 F5";
-        if(list.FailedDatabases.Length>0)Notice.Text+=" · 일부 DB 목록 조회 실패";
+        if(list.FailedDatabases.Length>0)Notice.Text+=" · 미확인 DB: "+string.Join(", ",list.FailedDatabases);
         UpdateRefreshLabel();
     }
 
